@@ -1,14 +1,7 @@
 #include <filesystem>
-#include <cstdlib>
 #include <iostream>
-#include <optional>
 #include <map>
-#include <optional>
-#include <vector>
 #include <getopt.h>
-#include <stdio.h>
-#include <string.h>
-
 #include <netinet/in.h>
 #include <async/async.h>
 #include <async/fsadns.h>
@@ -24,24 +17,17 @@ using std::exception;
 using std::filesystem::path;
 using std::map;
 using std::optional;
-using std::pair;
 using std::string;
-using std::unique_ptr;
 using std::vector;
+
 using std::cout;
 using std::cerr;
 using std::endl;
 
-using fsecure::encjson::JsonThingPtr;
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
 using pacujo::etc::Hold;
 using pacujo::net::SocketAddress;
-
-class TestException : public exception {
-public:
-    const char *what() const noexcept override { return "TestException"; }
-};
 
 class UsageException : public exception {
 public:
@@ -178,7 +164,7 @@ void App::read_configuration(path config_file)
     Hold<FILE> cfgf { fopen(config_file.c_str(), "r"), fclose };
     if (!cfgf)
         throw_errno(config_file);
-    JsonThingPtr cfg
+    Hold<json_thing_t> cfg
         { json_utf8_decode_file(cfgf.get(), 1000000), json_destroy_thing };
     if (!cfg || json_thing_type(cfg.get()) != JSON_OBJECT)
         throw BadConfigException();
