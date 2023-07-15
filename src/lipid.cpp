@@ -36,6 +36,7 @@ using fsecure::encjson::JsonThingPtr;
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
 using pacujo::etc::Hold;
+using pacujo::net::SocketAddress;
 
 class TestException : public exception {
 public:

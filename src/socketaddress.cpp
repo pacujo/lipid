@@ -1,6 +1,8 @@
 #include <string.h>
 #include "socketaddress.h"
 
+using pacujo::net::SocketAddress;
+
 void SocketAddress::from_ipv4(const struct addrinfo *res, unsigned port)
 {
     addrlen = res->ai_addrlen;

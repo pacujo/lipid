@@ -5,6 +5,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
+namespace pacujo::net {
+
 struct SocketAddress {
     sockaddr_storage address;
     socklen_t addrlen;
@@ -14,4 +16,6 @@ struct SocketAddress {
 
     static std::vector<SocketAddress> parse_addrinfo(const addrinfo *res,
                                                      unsigned port);
+};
+
 };
