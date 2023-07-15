@@ -18,6 +18,7 @@
 
 #include "coasync.h"
 #include "hold.h"
+#include "socketaddress.h"
 
 using std::exception;
 using std::filesystem::path;
@@ -34,16 +35,6 @@ using std::endl;
 using fsecure::encjson::JsonThingPtr;
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
-
-struct SocketAddress {
-    sockaddr_storage address;
-    socklen_t addrlen;
-
-    void from_ipv4(const addrinfo *res, unsigned port);
-    void from_ipv6(const addrinfo *res, unsigned port);
-};
-
-static vector<SocketAddress> parse_addrinfo(const addrinfo *res, unsigned port);
 
 class TestException : public exception {
 public:
@@ -259,11 +250,13 @@ App::Task App::resolve_addresses(const Thunk *notify)
     for (auto &local_fut : resolve_local) {
         auto &local = *it++;
         auto local_res { local_fut.await_resume() };
-        local.resolutions = parse_addrinfo(local_res.get(), local.port);
+        local.resolutions =
+            SocketAddress::parse_addrinfo(local_res.get(), local.port);
     }
     auto remote_res { resolve_irc_server.await_resume() };
-    auto remote_addresses
-        { parse_addrinfo(remote_res.get(), config_.irc_server.port) };
+    auto remote_addresses {
+        SocketAddress::parse_addrinfo(remote_res.get(), config_.irc_server.port)
+    };
 }
 
 App::Future<AddrInfo>
@@ -328,39 +321,6 @@ App::Task App::serve(const SocketAddress &address) {
             throw_errno();
         co_await std::suspend_always {};
     }
-}
-
-void SocketAddress::from_ipv4(const struct addrinfo *res, unsigned port)
-{
-    addrlen = res->ai_addrlen;
-    memcpy(&address, res->ai_addr, addrlen);
-    reinterpret_cast<struct sockaddr_in *>(&address)->sin_port = htons(port);
-}
-
-void SocketAddress::from_ipv6(const struct addrinfo *res, unsigned port)
-{
-    addrlen = res->ai_addrlen;
-    memcpy(&address, res->ai_addr, addrlen);
-    reinterpret_cast<struct sockaddr_in6 *>(&address)->sin6_port = htons(port);
-}
-
-static vector<SocketAddress> parse_addrinfo(const addrinfo *res, unsigned port)
-{
-    vector<SocketAddress> addresses;
-    SocketAddress address;
-    for (const addrinfo *r = res; r; r = r->ai_next)
-        switch (r->ai_family) {
-            case AF_INET:
-                address.from_ipv4(r, port);
-                addresses.push_back(address);
-                break;
-            case AF_INET6:
-                address.from_ipv6(r, port);
-                addresses.push_back(address);
-                break;
-            default:;
-        }
-    return addresses;
 }
 
 static void parse_cmdline(int argc, char **argv, Opts &opts)
