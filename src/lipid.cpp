@@ -17,6 +17,7 @@
 #include <fstrace.h>
 
 #include "coasync.h"
+#include "hold.h"
 
 using std::exception;
 using std::filesystem::path;
@@ -33,17 +34,6 @@ using std::endl;
 using fsecure::encjson::JsonThingPtr;
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
-
-template<typename T>
-class Hold {
-public:
-    Hold(T *ptr, std::function<void(T *)> f) : ptr_(ptr, f) {}
-    Hold(Hold &&other) : ptr_(other.ptr_) {}
-    T *get() const { return ptr_.get(); }
-    operator bool() const { return bool(ptr_); }
-private:
-    std::unique_ptr<T, std::function<void(T *)>> ptr_;
-};
 
 struct SocketAddress {
     sockaddr_storage address;
@@ -145,17 +135,6 @@ private:
     addrinfo *info_ {};
 };
 
-class Session {
-public:
-    Session(tcp_conn_t *conn) : conn_ { conn, tcp_close } {}
-    Session(Session &&other) = delete;
-    Session(const Session &other) = delete;
-    Session &operator=(const Session &other) = delete;
-    Session &operator=(Session &&other) = delete;
-private:
-    Hold<tcp_conn_t> conn_;
-};
-
 class App : public pacujo::coasync::Framework {
 public:
     App(const path &home_dir, const Opts &opts);
@@ -167,7 +146,7 @@ private:
     const Opts &opts_;
     Config config_;
     fsadns_t *resolver_;
-    vector<Session> sessions_;
+    vector<Task> sessions_;
 
     void read_configuration(path config_file);
     Task run_server();
