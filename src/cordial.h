@@ -145,6 +145,11 @@ public:
         Task(Task &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
         }
+        Task &operator=(Task &&other) {
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+            return *this;
+        }
         ~Task() { if (handle_) handle_.destroy(); }
 
     private:
@@ -181,6 +186,11 @@ public:
         Result await_resume() { return handle_.promise().get_result(); }
         Future(Future &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
+        }
+        Future &operator=(Task &&other) {
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+            return *this;
         }
         ~Future() { if (handle_) handle_.destroy(); }
 
@@ -224,6 +234,11 @@ public:
         }
         Flow(Flow &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
+        }
+        Flow &operator=(Task &&other) {
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+            return *this;
         }
         ~Flow() { if (handle_) handle_.destroy(); }
 

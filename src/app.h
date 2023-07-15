@@ -93,11 +93,24 @@ public:
     void run(fstrace_t *trace);
 
 private:
+    class Session {
+    public:
+        Session(const pacujo::cordial::Thunk &wakeup) : wakeup_ { wakeup } {}
+        Session(Session &&other) = default;
+        Session &operator=(Session &&other) = default;
+        void set_task(Task &&task) { task_ = std::move(task); }
+        const pacujo::cordial::Thunk *get_wakeup() const { return &wakeup_; }
+    private:
+        pacujo::cordial::Thunk wakeup_;
+        std::optional<Task> task_ {};
+    };
+
     std::filesystem::path home_dir_;
     const Opts &opts_;
     Config config_;
     fsadns_t *resolver_;
-    std::vector<Task> sessions_;
+    int64_t next_session_ { 0 };
+    std::map<int64_t, Session> sessions_;
 
     void read_configuration(std::filesystem::path config_file);
     Task run_server();
@@ -105,4 +118,5 @@ private:
     Future<AddrInfo> resolve_address(const pacujo::cordial::Thunk *notify,
                                      const std::string &address);
     Task serve(const pacujo::net::SocketAddress &address);
+    Task run_session(const pacujo::cordial::Thunk *notify, tcp_conn_t *conn);
 };

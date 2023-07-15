@@ -12,6 +12,7 @@
 
 using std::exception;
 using std::filesystem::path;
+using std::make_pair;
 using std::map;
 using std::optional;
 using std::string;
@@ -186,20 +187,57 @@ App::Task App::serve(const SocketAddress &address) {
     };
     if (!tcp_server)
         throw_errno();
-    tcp_register_server_callback(tcp_server.get(), thunk_to_action(wakeup));
+    /* A negative notification indicates a possibility for
+     * tcp_accept(). A non-negative notification is the key of a
+     * session that has finished. */
+    vector<int64_t> notifications;
+    Thunk wakeup_accept {
+        [wakeup, &notifications]() {
+            cout << "accept?" << endl;
+            notifications.push_back(-1);
+            (*wakeup)();
+        }
+    };
+    tcp_register_server_callback(tcp_server.get(),
+                                 thunk_to_action(&wakeup_accept));
     Hold<tcp_server_t> dereg
         { tcp_server.get(), tcp_unregister_server_callback };
     cout << "listening" << endl;
     for (;;) {
-        auto tcp_conn = tcp_accept(tcp_server.get(), nullptr, nullptr);
-        if (tcp_conn != nullptr) {
+        for (auto key : notifications)
+            if (key >= 0) {
+                cout << "erase " << key << endl;
+                sessions_.erase(sessions_.find(key));
+            }
+        notifications.clear();
+        for (;;) {
+            auto conn = tcp_accept(tcp_server.get(), nullptr, nullptr);
+            if (conn == nullptr)
+                break;
             cout << "connected" << endl;
-            continue;
+            auto key { next_session_++ };
+            Thunk wakeup_end {
+                [key, wakeup, &notifications]() {
+                    cout << "end of " << key << endl;
+                    notifications.push_back(key);
+                    (*wakeup)();
+                }
+            };
+            sessions_.emplace(make_pair<int64_t, Session>(std::move(key),
+                                                          { wakeup_end }));
+            auto &[_, session] = *sessions_.find(key);
+            session.set_task(run_session(session.get_wakeup(), conn));
         }
         if (errno != EAGAIN)
             throw_errno();
         co_await std::suspend_always {};
     }
+}
+
+App::Task App::run_session(const Thunk *notify, tcp_conn_t *conn)
+{
+    auto [promise, wakeup] { co_await intro<Task::introspect>(notify) };
+    co_return;
 }
 
 static void parse_cmdline(int argc, char **argv, Opts &opts)
