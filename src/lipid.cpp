@@ -35,6 +35,7 @@ using std::endl;
 using fsecure::encjson::JsonThingPtr;
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
+using pacujo::etc::Hold;
 
 class TestException : public exception {
 public:
