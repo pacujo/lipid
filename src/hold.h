@@ -10,8 +10,9 @@ namespace pacujo::etc {
 template<typename T>
 class Hold {
 public:
-    Hold(T *ptr, std::function<void(T *)> release) : ptr_(ptr, release) {}
-    Hold(Hold &&other) : ptr_(other.ptr_) {}
+    Hold(T *ptr, std::function<void(T *)> release) : ptr_ { ptr, release } {}
+    Hold(Hold &&other) = default;
+    Hold &operator=(Hold &&other) = default;
     T *get() const { return ptr_.get(); }
     operator bool() const { return bool(ptr_); }
 private:

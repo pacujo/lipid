@@ -9,6 +9,7 @@
 
 #include "coasync.h"
 #include "socketaddress.h"
+#include "hold.h"
 
 class UsageException : public std::exception {
 public:
@@ -76,23 +77,13 @@ struct Opts {
 
 class AddrInfo {
 public:
-    AddrInfo() {}
-    AddrInfo(addrinfo *info) : info_ { info } {}
-    AddrInfo(AddrInfo &&other) : info_ { other.info_ } {
-        other.info_ = nullptr;
-    }
-    AddrInfo &operator=(AddrInfo &&other) {
-        info_ = other.info_;
-        other.info_ = nullptr;
-        return *this;
-    }
-    ~AddrInfo() {
-        if (info_)
-            fsadns_freeaddrinfo(info_);
-    }
-    const addrinfo *get() const { return info_; }
+    AddrInfo(addrinfo *info = nullptr) : info_ { info, fsadns_freeaddrinfo } {}
+    AddrInfo(AddrInfo &&other) = default;
+    AddrInfo &operator=(AddrInfo &&other) = default;
+    const addrinfo *get() const { return info_.get(); }
+    operator bool() const { return bool(info_); }
 private:
-    addrinfo *info_ {};
+    pacujo::etc::Hold<addrinfo> info_;
 };
 
 class App : public pacujo::coasync::Framework {
