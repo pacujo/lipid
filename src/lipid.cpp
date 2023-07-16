@@ -239,6 +239,21 @@ App::Task App::serve(const SocketAddress &address, const Local &local) {
     }
 }
 
+class ByteStream {
+public:
+    ByteStream(queuestream_t *qstr) :
+        bs_ { queuestream_as_bytestream_1(qstr) } {}
+    ByteStream(jsonencoder_t *encoder) :
+        bs_ { jsonencoder_as_bytestream_1(encoder) } {}
+    ByteStream(naiveencoder_t *encoder) :
+        bs_ { naiveencoder_as_bytestream_1(encoder) } {}
+
+    operator bytestream_1() const { return bs_; }
+    
+private:
+    bytestream_1 bs_;
+};
+
 App::Task
 App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                  const Local &local)
@@ -253,8 +268,7 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
             tls_close
         };
     auto responses { make_queuestream(get_async()) };
-    tls_set_plain_output_stream(tls_conn.get(),
-                                queuestream_as_bytestream_1(responses));
+    tls_set_plain_output_stream(tls_conn.get(), ByteStream { responses });
     tcp_set_output_stream(tcp_conn.get(),
                           tls_get_encrypted_output_stream(tls_conn.get()));
     Hold<jsonyield_t> requests
@@ -273,11 +287,7 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
             if (!request)
                 break;
             // echo back
-            auto encoder { json_encode(get_async(), request.get()) };
-            auto bs { jsonencoder_as_bytestream_1(encoder) };
-            auto framer { naive_encode(get_async(), bs, 0, 0) };
-            auto bs2 { naiveencoder_as_bytestream_1(framer) };
-            queuestream_enqueue(responses, bs2);
+            send(responses, request.get());
         }
         if (errno != EAGAIN)
             break;
@@ -286,6 +296,13 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     if (errno != 0)
         throw_errno();
     queuestream_terminate(responses);
+}
+
+void App::send(queuestream_t *qstr, json_thing_t *msg)
+{
+    ByteStream encoder { json_encode(get_async(), msg) };
+    ByteStream framer { naive_encode(get_async(), encoder, 0, 0) };
+    queuestream_enqueue(qstr, framer);
 }
 
 static void parse_cmdline(int argc, char **argv, Opts &opts)
