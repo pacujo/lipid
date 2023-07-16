@@ -110,10 +110,10 @@ public:
             promise_ = &h.promise();
             return false;
         }
-        std::pair<PromiseType *, const Thunk *> await_resume() const noexcept {
+        const Thunk *await_resume() const noexcept {
             auto companion { new Companion(promise_, framework_) };
             promise_->arm(notify_, companion);
-            return std::pair(promise_, companion->wakeup());
+            return companion->wakeup();
         }
 
     private:

@@ -50,7 +50,7 @@ private:
 
 public:
     Task reschedule(const pacujo::cordial::Thunk *notify) override {
-        auto [promise, wakeup] { co_await intro<Task::introspect>(notify) };
+        auto wakeup { co_await intro<Task::introspect>(notify) };
         Timer t { get_async(), wakeup };
         co_await std::suspend_always {};
     }
@@ -78,7 +78,7 @@ private:
     }
 
     Task delay_ns(const pacujo::cordial::Thunk *notify, uint64_t ns) override {
-        auto [promise, wakeup] { co_await intro<Task::introspect>(notify) };
+        auto wakeup { co_await intro<Task::introspect>(notify) };
         Timer t { get_async(), async_now(get_async()) + ns * ASYNC_NS, wakeup };
         co_await std::suspend_always {};
     }

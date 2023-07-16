@@ -115,7 +115,7 @@ static path find_home_dir()
 
 App::Task App::run_server()
 {
-    auto [promise, wakeup] { co_await intro<Task::introspect>() };
+    auto wakeup { co_await intro<Task::introspect>() };
     co_await resolve_addresses(wakeup);
     vector<Task> holder;
     for (auto &local : config_.local)
@@ -127,7 +127,7 @@ App::Task App::run_server()
 
 App::Task App::resolve_addresses(const Thunk *notify)
 {
-    auto [promise, wakeup] { co_await intro<Task::introspect>(notify) };
+    auto wakeup { co_await intro<Task::introspect>(notify) };
     vector<Future<AddrInfo>> resolve_local;
     for (auto &local : config_.local)
         resolve_local.emplace_back(resolve_address(wakeup, local.address));
@@ -152,8 +152,7 @@ App::Task App::resolve_addresses(const Thunk *notify)
 App::Future<AddrInfo>
 App::resolve_address(const Thunk *notify, const string &address)
 {
-    auto [promise, wakeup]
-        { co_await intro<Future<AddrInfo>::introspect>(notify) };
+    auto wakeup { co_await intro<Future<AddrInfo>::introspect>(notify) };
     auto resolved { false };
     auto canceler {
         [&resolved](fsadns_query_t *query) {
@@ -186,7 +185,7 @@ App::resolve_address(const Thunk *notify, const string &address)
 }
 
 App::Task App::serve(const SocketAddress &address, const Local &local) {
-    auto [promise, wakeup] { co_await intro<Task::introspect>() };
+    auto wakeup { co_await intro<Task::introspect>() };
     Hold<tcp_server_t> tcp_server {
         tcp_listen(get_async(),
                    reinterpret_cast<const sockaddr *>(&address.address),
@@ -258,7 +257,7 @@ App::Task
 App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                  const Local &local)
 {
-    auto [promise, wakeup] { co_await intro<Task::introspect>(notify) };
+    auto wakeup { co_await intro<Task::introspect>(notify) };
     Hold<tls_conn_t> tls_conn
         {
             open_tls_server(get_async(),
@@ -293,7 +292,7 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
 App::Flow<Hold<json_thing_t>>
 App::get_request(const Thunk *notify, jsonyield_t *requests)
 {
-    auto [promise, wakeup]
+    auto wakeup
         { co_await intro<Flow<Hold<json_thing_t>>::introspect>(notify) };
     jsonyield_register_callback(requests, thunk_to_action(wakeup));
     Hold<jsonyield_t> dereg { requests, jsonyield_unregister_callback };
