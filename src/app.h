@@ -55,6 +55,8 @@ struct Local {
     std::vector<pacujo::net::SocketAddress> resolutions;
     int port { 11345 };
     std::optional<std::string> tls_server_name;
+    std::string certificate;
+    std::string private_key;
 };
 
 struct Config {
@@ -117,6 +119,8 @@ private:
     Task resolve_addresses(const pacujo::cordial::Thunk *notify);
     Future<AddrInfo> resolve_address(const pacujo::cordial::Thunk *notify,
                                      const std::string &address);
-    Task serve(const pacujo::net::SocketAddress &address);
-    Task run_session(const pacujo::cordial::Thunk *notify, tcp_conn_t *conn);
+    Task serve(const pacujo::net::SocketAddress &address, const Local &local);
+    Task run_session(const pacujo::cordial::Thunk *notify,
+                     pacujo::etc::Hold<tcp_conn_t> tcp_conn,
+                     const Local &local);
 };

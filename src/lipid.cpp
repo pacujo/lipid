@@ -4,6 +4,11 @@
 #include <netinet/in.h>
 #include <async/async.h>
 #include <async/tcp_connection.h>
+#include <async/tls_connection.h>
+#include <async/queuestream.h>
+#include <async/jsonyield.h>
+#include <async/jsonencoder.h>
+#include <async/naiveencoder.h>
 #include <encjson.h>
 #include <fstrace.h>
 
@@ -76,6 +81,12 @@ void App::read_configuration(path config_file)
             const char *name;
             if (json_object_get_string(value, "tls-server-name", &name))
                 local.tls_server_name = name;
+            const char *certificate;
+            if (json_object_get_string(value, "certificate", &certificate))
+                local.certificate = certificate;
+            const char *private_key;
+            if (json_object_get_string(value, "private-key", &private_key))
+                local.private_key = private_key;
             config_.local.push_back(local);
         }
     json_thing_t *irc_server;
@@ -106,11 +117,10 @@ App::Task App::run_server()
 {
     auto [promise, wakeup] { co_await intro<Task::introspect>() };
     co_await resolve_addresses(wakeup);
-    cout << "Got them!" << endl;
     vector<Task> holder;
     for (auto &local : config_.local)
         for (auto &res : local.resolutions)
-            holder.push_back(serve(res));
+            holder.push_back(serve(res, local));
     for (auto &_ : holder)
         co_await std::suspend_always {};
 }
@@ -144,7 +154,6 @@ App::resolve_address(const Thunk *notify, const string &address)
 {
     auto [promise, wakeup]
         { co_await intro<Future<AddrInfo>::introspect>(notify) };
-    cout << "resolve " << address << endl;
     auto resolved { false };
     auto canceler {
         [&resolved](fsadns_query_t *query) {
@@ -166,7 +175,6 @@ App::resolve_address(const Thunk *notify, const string &address)
         auto status { fsadns_check(query.get(), &res) };
         if (status == 0) {
             resolved = true;
-            cout << "resolved " << address << endl;
             co_return res;
         }
         if (status != EAI_SYSTEM)
@@ -177,7 +185,7 @@ App::resolve_address(const Thunk *notify, const string &address)
     }
 }
 
-App::Task App::serve(const SocketAddress &address) {
+App::Task App::serve(const SocketAddress &address, const Local &local) {
     auto [promise, wakeup] { co_await intro<Task::introspect>() };
     Hold<tcp_server_t> tcp_server {
         tcp_listen(get_async(),
@@ -193,7 +201,6 @@ App::Task App::serve(const SocketAddress &address) {
     vector<int64_t> notifications;
     Thunk wakeup_accept {
         [wakeup, &notifications]() {
-            cout << "accept?" << endl;
             notifications.push_back(-1);
             (*wakeup)();
         }
@@ -202,23 +209,19 @@ App::Task App::serve(const SocketAddress &address) {
                                  thunk_to_action(&wakeup_accept));
     Hold<tcp_server_t> dereg
         { tcp_server.get(), tcp_unregister_server_callback };
-    cout << "listening" << endl;
     for (;;) {
         for (auto key : notifications)
-            if (key >= 0) {
-                cout << "erase " << key << endl;
+            if (key >= 0)
                 sessions_.erase(sessions_.find(key));
-            }
         notifications.clear();
         for (;;) {
-            auto conn = tcp_accept(tcp_server.get(), nullptr, nullptr);
-            if (conn == nullptr)
+            Hold<tcp_conn_t> tcp_conn
+                { tcp_accept(tcp_server.get(), nullptr, nullptr), tcp_close };
+            if (!tcp_conn)
                 break;
-            cout << "connected" << endl;
             auto key { next_session_++ };
             Thunk wakeup_end {
                 [key, wakeup, &notifications]() {
-                    cout << "end of " << key << endl;
                     notifications.push_back(key);
                     (*wakeup)();
                 }
@@ -226,7 +229,9 @@ App::Task App::serve(const SocketAddress &address) {
             sessions_.emplace(make_pair<int64_t, Session>(std::move(key),
                                                           { wakeup_end }));
             auto &[_, session] = *sessions_.find(key);
-            session.set_task(run_session(session.get_wakeup(), conn));
+            session.set_task(run_session(session.get_wakeup(),
+                                         std::move(tcp_conn),
+                                         local));
         }
         if (errno != EAGAIN)
             throw_errno();
@@ -234,10 +239,53 @@ App::Task App::serve(const SocketAddress &address) {
     }
 }
 
-App::Task App::run_session(const Thunk *notify, tcp_conn_t *conn)
+App::Task
+App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
+                 const Local &local)
 {
     auto [promise, wakeup] { co_await intro<Task::introspect>(notify) };
-    co_return;
+    Hold<tls_conn_t> tls_conn
+        {
+            open_tls_server(get_async(),
+                            tcp_get_input_stream(tcp_conn.get()),
+                            local.certificate.c_str(),
+                            local.private_key.c_str()),
+            tls_close
+        };
+    auto responses { make_queuestream(get_async()) };
+    tls_set_plain_output_stream(tls_conn.get(),
+                                queuestream_as_bytestream_1(responses));
+    tcp_set_output_stream(tcp_conn.get(),
+                          tls_get_encrypted_output_stream(tls_conn.get()));
+    Hold<jsonyield_t> requests
+        {
+            open_jsonyield(get_async(),
+                           tls_get_plain_input_stream(tls_conn.get()),
+                           100'000),
+            jsonyield_close
+        };
+    jsonyield_register_callback(requests.get(), thunk_to_action(wakeup));
+    Hold<jsonyield_t> dereg { requests.get(), jsonyield_unregister_callback };
+    for (;;) {
+        for (;;) {
+            Hold<json_thing_t> request
+                { jsonyield_receive(requests.get()), json_destroy_thing };
+            if (!request)
+                break;
+            // echo back
+            auto encoder { json_encode(get_async(), request.get()) };
+            auto bs { jsonencoder_as_bytestream_1(encoder) };
+            auto framer { naive_encode(get_async(), bs, 0, 0) };
+            auto bs2 { naiveencoder_as_bytestream_1(framer) };
+            queuestream_enqueue(responses, bs2);
+        }
+        if (errno != EAGAIN)
+            break;
+        co_await std::suspend_always {};
+    }
+    if (errno != 0)
+        throw_errno();
+    queuestream_terminate(responses);
 }
 
 static void parse_cmdline(int argc, char **argv, Opts &opts)
