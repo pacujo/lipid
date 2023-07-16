@@ -253,40 +253,55 @@ private:
     bytestream_1 bs_;
 };
 
+class Stack {
+public:
+    Stack(async_t *async, Hold<tcp_conn_t> tcp_conn, const Local &local) :
+        tcp_conn_ { std::move(tcp_conn) },
+        tls_conn_ {
+            open_tls_server(async,
+                            tcp_get_input_stream(tcp_conn_.get()),
+                            local.certificate.c_str(),
+                            local.private_key.c_str()),
+            tls_close
+        },
+        responses_ { make_queuestream(async),  queuestream_terminate },
+        requests_ {
+            open_jsonyield(async,
+                           tls_get_plain_input_stream(tls_conn_.get()),
+                           100'000),
+            jsonyield_close
+        }
+    {
+        tls_set_plain_output_stream(tls_conn_.get(),
+                                    ByteStream { responses_.get() });
+        tcp_set_output_stream(tcp_conn_.get(),
+                              tls_get_encrypted_output_stream(tls_conn_.get()));
+    }
+
+    jsonyield_t *get_requests() const { return requests_.get(); }
+    queuestream_t *get_responses() const { return responses_.get(); }
+
+private:
+    Hold<tcp_conn_t> tcp_conn_;
+    Hold<tls_conn_t> tls_conn_;
+    Hold<queuestream_t> responses_;
+    Hold<jsonyield_t> requests_;
+};
+
 App::Task
 App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                  const Local &local)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
-    Hold<tls_conn_t> tls_conn
-        {
-            open_tls_server(get_async(),
-                            tcp_get_input_stream(tcp_conn.get()),
-                            local.certificate.c_str(),
-                            local.private_key.c_str()),
-            tls_close
-        };
-    auto responses { make_queuestream(get_async()) };
-    tls_set_plain_output_stream(tls_conn.get(), ByteStream { responses });
-    tcp_set_output_stream(tcp_conn.get(),
-                          tls_get_encrypted_output_stream(tls_conn.get()));
-    Hold<jsonyield_t> requests
-        {
-            open_jsonyield(get_async(),
-                           tls_get_plain_input_stream(tls_conn.get()),
-                           100'000),
-            jsonyield_close
-        };
-
-    auto source { get_request(wakeup, requests.get()) };
+    Stack stack(get_async(), std::move(tcp_conn), local);
+    auto source { get_request(wakeup, stack.get_requests()) };
     for (;;) {
         auto request { co_await source };
         if (!request)
             break;
         // echo back
-        send(responses, request->get());
+        send(stack.get_responses(), request->get());
     }
-    queuestream_terminate(responses);
 }
 
 App::Flow<Hold<json_thing_t>>
