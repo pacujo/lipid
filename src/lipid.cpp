@@ -278,16 +278,32 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                            100'000),
             jsonyield_close
         };
-    jsonyield_register_callback(requests.get(), thunk_to_action(wakeup));
-    Hold<jsonyield_t> dereg { requests.get(), jsonyield_unregister_callback };
+
+    auto source { get_request(wakeup, requests.get()) };
+    for (;;) {
+        auto request { co_await source };
+        if (!request)
+            break;
+        // echo back
+        send(responses, request->get());
+    }
+    queuestream_terminate(responses);
+}
+
+App::Flow<Hold<json_thing_t>>
+App::get_request(const Thunk *notify, jsonyield_t *requests)
+{
+    auto [promise, wakeup]
+        { co_await intro<Flow<Hold<json_thing_t>>::introspect>(notify) };
+    jsonyield_register_callback(requests, thunk_to_action(wakeup));
+    Hold<jsonyield_t> dereg { requests, jsonyield_unregister_callback };
     for (;;) {
         for (;;) {
             Hold<json_thing_t> request
-                { jsonyield_receive(requests.get()), json_destroy_thing };
+                { jsonyield_receive(requests), json_destroy_thing };
             if (!request)
                 break;
-            // echo back
-            send(responses, request.get());
+            co_yield std::move(request);
         }
         if (errno != EAGAIN)
             break;
@@ -295,7 +311,6 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     }
     if (errno != 0)
         throw_errno();
-    queuestream_terminate(responses);
 }
 
 void App::send(queuestream_t *qstr, json_thing_t *msg)

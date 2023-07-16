@@ -123,5 +123,8 @@ private:
     Task run_session(const pacujo::cordial::Thunk *notify,
                      pacujo::etc::Hold<tcp_conn_t> tcp_conn,
                      const Local &local);
+    Flow<pacujo::etc::Hold<json_thing_t>>
+    get_request(const pacujo::cordial::Thunk *notify,
+                jsonyield_t *requests);
     void send(queuestream_t *q, json_thing_t *msg);
 };
