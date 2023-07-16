@@ -228,7 +228,9 @@ public:
 
         bool await_ready() { return false; }
         void await_suspend() { handle_.resume(); }
-        void await_suspend(std::coroutine_handle<> h) { h.resume(); }
+        void await_suspend(std::coroutine_handle<> h) {
+            await_suspend();
+        }
         std::optional<Result> await_resume() {
             return handle_.promise().get_result();
         }
