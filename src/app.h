@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <async/fsadns.h>
+#include <async/tcp_connection.h>
 
 #include "coasync.h"
 #include "socketaddress.h"
@@ -109,7 +110,6 @@ private:
 class App : public pacujo::coasync::Framework {
 public:
     App(const std::filesystem::path &home_dir, const Opts &opts);
-    ~App();
     void run(fstrace_t *trace);
 
 private:
@@ -128,7 +128,7 @@ private:
     std::filesystem::path home_dir_;
     const Opts &opts_;
     Config config_;
-    fsadns_t *resolver_;
+    std::optional<pacujo::etc::Hold<fsadns_t>> resolver_;
     int64_t next_session_ { 0 };
     std::map<int64_t, Session> sessions_;
 
@@ -145,6 +145,8 @@ private:
                      const Local &local);
     bool authorized(std::optional<pacujo::etc::Hold<json_thing_t>> login_req);
     void authorize(std::optional<pacujo::etc::Hold<json_thing_t>> login_req);
+    Future<pacujo::etc::Hold<tcp_conn_t>>
+    connect_to_server(const pacujo::cordial::Thunk *notify);
     Flow<pacujo::etc::Hold<json_thing_t>>
     get_request(const pacujo::cordial::Thunk *notify,
                 jsonyield_t *requests);

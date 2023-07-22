@@ -5,7 +5,7 @@
 #include <netinet/in.h>
 #include <openssl/sha.h>
 #include <async/async.h>
-#include <async/tcp_connection.h>
+#include <async/tcp_client.h>
 #include <async/tls_connection.h>
 #include <async/queuestream.h>
 #include <async/jsonyield.h>
@@ -26,6 +26,8 @@ using std::optional;
 using std::string;
 using std::vector;
 
+static const std::suspend_always suspend;
+
 using std::cout;
 using std::cerr;
 using std::endl;
@@ -42,20 +44,16 @@ App::App(const path &home_dir, const Opts &opts) :
 {
 }
 
-App::~App()
-{
-    if (resolver_ != nullptr)
-        fsadns_destroy_resolver(resolver_);
-}
-
 void App::run(fstrace_t *trace)
 {
     if (opts_.config_file)
         read_configuration(*opts_.config_file);
     else read_configuration(home_dir_ / ".config/lipid/config.json");
     Thunk postfork = [trace]() { fstrace_reopen(trace); };
-    resolver_ =
-        fsadns_make_resolver(get_async(), 4, thunk_to_action(&postfork));
+    resolver_ = Hold<fsadns_t> {
+        fsadns_make_resolver(get_async(), 4, thunk_to_action(&postfork)),
+        fsadns_destroy_resolver
+    };
     auto server { run_server() };
     if (async_loop(get_async()) < 0)
         throw_errno();
@@ -154,7 +152,7 @@ App::Task App::run_server()
         for (auto &res : local.resolutions)
             holder.push_back(serve(res, local));
     for (auto &_ : holder)
-        co_await std::suspend_always {};
+        co_await suspend;
 }
 
 App::Task App::resolve_addresses(const Thunk *notify)
@@ -163,11 +161,8 @@ App::Task App::resolve_addresses(const Thunk *notify)
     vector<Future<AddrInfo>> resolve_local;
     for (auto &local : config_.local)
         resolve_local.emplace_back(resolve_address(wakeup, local.address));
-    auto resolve_irc_server
-        { resolve_address(wakeup, config_.irc_server.address) };
     for (auto &_ : resolve_local)
-        co_await std::suspend_always {};
-    co_await std::suspend_always {};
+        co_await suspend;
     auto it { config_.local.begin() };
     for (auto &local_fut : resolve_local) {
         auto &local = *it++;
@@ -175,14 +170,10 @@ App::Task App::resolve_addresses(const Thunk *notify)
         local.resolutions =
             SocketAddress::parse_addrinfo(local_res.get(), local.port);
     }
-    auto remote_res { resolve_irc_server.await_resume() };
-    auto remote_addresses {
-        SocketAddress::parse_addrinfo(remote_res.get(), config_.irc_server.port)
-    };
 }
 
-App::Future<AddrInfo>
-App::resolve_address(const Thunk *notify, const string &address)
+App::Future<AddrInfo> App::resolve_address(const Thunk *notify,
+                                           const string &address)
 {
     auto wakeup { co_await intro<Future<AddrInfo>::introspect>(notify) };
     auto resolved { false };
@@ -197,7 +188,7 @@ App::resolve_address(const Thunk *notify, const string &address)
         .ai_protocol = IPPROTO_TCP,
     };
     Hold<fsadns_query_t> query {
-        fsadns_resolve(resolver_, address.c_str(), nullptr, &hint,
+        fsadns_resolve(resolver_->get(), address.c_str(), nullptr, &hint,
                        thunk_to_action(wakeup)),
         canceler
     };
@@ -212,11 +203,12 @@ App::resolve_address(const Thunk *notify, const string &address)
             throw AddressResolutionException(status);
         if (errno != EAGAIN)
             throw_errno();
-        co_await std::suspend_always {};
+        co_await suspend;
     }
 }
 
-App::Task App::serve(const SocketAddress &address, const Local &local) {
+App::Task App::serve(const SocketAddress &address, const Local &local)
+{
     auto wakeup { co_await intro<Task::introspect>() };
     Hold<tcp_server_t> tcp_server {
         tcp_listen(get_async(),
@@ -266,7 +258,7 @@ App::Task App::serve(const SocketAddress &address, const Local &local) {
         }
         if (errno != EAGAIN)
             throw_errno();
-        co_await std::suspend_always {};
+        co_await suspend;
     }
 }
 
@@ -320,9 +312,8 @@ private:
     Hold<jsonyield_t> requests_;
 };
 
-App::Task
-App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
-                 const Local &local)
+App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
+                           const Local &local)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
     ClientStack stack(get_async(), std::move(tcp_conn), local);
@@ -333,6 +324,11 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
         co_await delay(wakeup, 3s);
         co_return;
     }
+#if 0
+    Hold<queuestream_t> irc_commands
+        { make_queuestream(get_async()), queuestream_terminate };
+#endif
+    auto irc_conn { co_await connect_to_server(wakeup) };
     Hold<json_thing_t> login_resp { json_make_object(), json_destroy_thing };
     json_add_to_object(login_resp.get(), "type", json_make_string("login"));
     send(stack.get_responses(), login_resp.get());
@@ -385,6 +381,30 @@ void App::authorize(optional<Hold<json_thing_t>> login_req)
         throw UnauthorizedException("authentication failure");
 }
 
+App::Future<Hold<tcp_conn_t>> App::connect_to_server(const Thunk *notify)
+{
+    auto wakeup
+        { co_await intro<Future<Hold<tcp_conn_t>>::introspect>(notify) };
+    Hold<tcp_client_t> setup {
+        open_tcp_client_2(get_async(),
+                          config_.irc_server.address.c_str(),
+                          config_.irc_server.port,
+                          resolver_->get()),
+        tcp_client_close
+    };
+    tcp_client_register_callback(setup.get(), thunk_to_action(wakeup));
+    Hold<tcp_client_t> dereg { setup.get(), tcp_client_unregister_callback };
+    for (;;) {
+        Hold<tcp_conn_t> irc_conn
+            { tcp_client_establish(setup.get()), tcp_close };
+        if (irc_conn)
+            co_return irc_conn;
+        if (errno != EAGAIN)
+            throw_errno();
+        co_await suspend;
+    }
+}
+
 App::Flow<Hold<json_thing_t>>
 App::get_request(const Thunk *notify, jsonyield_t *requests)
 {
@@ -393,19 +413,21 @@ App::get_request(const Thunk *notify, jsonyield_t *requests)
     jsonyield_register_callback(requests, thunk_to_action(wakeup));
     Hold<jsonyield_t> dereg { requests, jsonyield_unregister_callback };
     for (;;) {
-        for (;;) {
-            Hold<json_thing_t> request
-                { jsonyield_receive(requests), json_destroy_thing };
-            if (!request)
-                break;
+        Hold<json_thing_t> request
+            { jsonyield_receive(requests), json_destroy_thing };
+        if (request)
             co_yield std::move(request);
-        }
-        if (errno != EAGAIN)
-            break;
-        co_await std::suspend_always {};
+        else
+            switch (errno) {
+                case 0:
+                    co_return;
+                case EAGAIN:
+                    co_await suspend;
+                    break;
+                default:
+                    throw_errno();
+            }
     }
-    if (errno != 0)
-        throw_errno();
 }
 
 void App::send(queuestream_t *qstr, json_thing_t *msg)
