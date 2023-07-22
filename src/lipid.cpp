@@ -1,7 +1,9 @@
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <getopt.h>
 #include <netinet/in.h>
+#include <openssl/sha.h>
 #include <async/async.h>
 #include <async/tcp_connection.h>
 #include <async/tls_connection.h>
@@ -10,6 +12,7 @@
 #include <async/jsonencoder.h>
 #include <async/naiveencoder.h>
 #include <encjson.h>
+#include <fsdyn/base64.h>
 #include <fstrace.h>
 
 #include "app.h"
@@ -31,6 +34,8 @@ using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
 using pacujo::etc::Hold;
 using pacujo::net::SocketAddress;
+
+using namespace std::chrono_literals;
 
 App::App(const path &home_dir, const Opts &opts) :
     home_dir_ { home_dir }, opts_ { opts }
@@ -66,29 +71,11 @@ void App::read_configuration(path config_file)
     if (!cfg || json_thing_type(cfg.get()) != JSON_OBJECT)
         throw BadConfigException();
     json_thing_t *locals;
-    if (json_object_get_array(cfg.get(), "local", &locals))
-        for (auto e = json_array_first(locals); e; e = json_element_next(e)) {
-            auto value = json_element_value(e);
-            if (json_thing_type(value) != JSON_OBJECT)
-                throw BadConfigException();
-            Local local;
-            const char *address;
-            if (json_object_get_string(value, "address", &address))
-                local.address = address;
-            long long port;
-            if (json_object_get_integer(value, "port", &port))
-                local.port = port;
-            const char *name;
-            if (json_object_get_string(value, "tls-server-name", &name))
-                local.tls_server_name = name;
-            const char *certificate;
-            if (json_object_get_string(value, "certificate", &certificate))
-                local.certificate = certificate;
-            const char *private_key;
-            if (json_object_get_string(value, "private-key", &private_key))
-                local.private_key = private_key;
-            config_.local.push_back(local);
-        }
+    if (json_object_get_array(cfg.get(), "locals", &locals))
+        add_locals(locals);
+    json_thing_t *clients;
+    if (json_object_get_object(cfg.get(), "clients", &clients))
+        add_clients(clients);
     json_thing_t *irc_server;
     if (json_object_get_object(cfg.get(), "irc-server", &irc_server)) {
         const char *address;
@@ -100,6 +87,51 @@ void App::read_configuration(path config_file)
         bool use_tls;
         if (json_object_get_boolean(irc_server, "use_tls", &use_tls))
             config_.irc_server.use_tls = use_tls;
+    }
+}
+
+void App::add_locals(json_thing_t *locals)
+{
+    for (auto e = json_array_first(locals); e; e = json_element_next(e)) {
+        auto value = json_element_value(e);
+        if (json_thing_type(value) != JSON_OBJECT)
+            throw BadConfigException();
+        Local local;
+        const char *address;
+        if (json_object_get_string(value, "address", &address))
+            local.address = address;
+        long long port;
+        if (json_object_get_integer(value, "port", &port))
+            local.port = port;
+        const char *name;
+        if (json_object_get_string(value, "tls-server-name", &name))
+            local.tls_server_name = name;
+        const char *certificate;
+        if (json_object_get_string(value, "certificate", &certificate))
+            local.certificate = certificate;
+        const char *private_key;
+        if (json_object_get_string(value, "private-key", &private_key))
+            local.private_key = private_key;
+        config_.local.push_back(local);
+    }
+}
+
+void App::add_clients(json_thing_t *clients)
+{
+    for (auto field = json_object_first(clients); field;
+         field = json_field_next(field)) {
+        auto name { json_field_name(field) };
+        auto value { json_field_value(field) };
+        if (json_thing_type(value) != JSON_OBJECT)
+            throw BadConfigException();
+        Client client;
+        const char *salt;
+        if (json_object_get_string(value, "salt", &salt))
+            client.salt = salt;
+        const char *sha256;
+        if (json_object_get_string(value, "sha256", &sha256))
+            client.sha256 = sha256;
+        config_.clients[name] = client;
     }
 }
 
@@ -253,9 +285,9 @@ private:
     bytestream_1 bs_;
 };
 
-class Stack {
+class ClientStack {
 public:
-    Stack(async_t *async, Hold<tcp_conn_t> tcp_conn, const Local &local) :
+    ClientStack(async_t *async, Hold<tcp_conn_t> tcp_conn, const Local &local) :
         tcp_conn_ { std::move(tcp_conn) },
         tls_conn_ {
             open_tls_server(async,
@@ -293,8 +325,17 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                  const Local &local)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
-    Stack stack(get_async(), std::move(tcp_conn), local);
+    ClientStack stack(get_async(), std::move(tcp_conn), local);
     auto source { get_request(wakeup, stack.get_requests()) };
+    auto login_req { co_await source };
+    if (!authorized(std::move(login_req))) {
+        cerr << "client unauthorized" << endl;
+        co_await delay(wakeup, 3s);
+        co_return;
+    }
+    Hold<json_thing_t> login_resp { json_make_object(), json_destroy_thing };
+    json_add_to_object(login_resp.get(), "type", json_make_string("login"));
+    send(stack.get_responses(), login_resp.get());
     for (;;) {
         auto request { co_await source };
         if (!request)
@@ -302,6 +343,46 @@ App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
         // echo back
         send(stack.get_responses(), request->get());
     }
+}
+
+bool App::authorized(optional<Hold<json_thing_t>> login_req)
+{
+    try {
+        authorize(std::move(login_req));
+    } catch (const UnauthorizedException &e) {
+        return false;
+    }
+    return true;
+}
+
+void App::authorize(optional<Hold<json_thing_t>> login_req)
+{
+    if (!login_req)
+        throw UnauthorizedException("no login request");
+    if (json_thing_type(login_req->get()) != JSON_OBJECT)
+        throw UnauthorizedException("bad login request");
+    const char *type;
+    if (!json_object_get_string(login_req->get(), "type", &type))
+        throw UnauthorizedException("no login request type");
+    if (string(type) != "login")
+        throw UnauthorizedException("login request expected");
+    const char *name;
+    if (!json_object_get_string(login_req->get(), "name", &name))
+        throw UnauthorizedException("no login request name");
+    const char *secret;
+    if (!json_object_get_string(login_req->get(), "secret", &secret))
+        throw UnauthorizedException("no login request secret");
+    auto it { config_.clients.find(name) };
+    if (it == config_.clients.end())
+        throw UnauthorizedException("unknown login client");
+    const auto &client { it->second };
+    const auto tester { client.salt + "\n" + secret + "\n" };
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const uint8_t *>(tester.c_str()), tester.length(),
+           hash);
+    Hold<char> sha256 { base64_encode_simple(hash, sizeof hash), fsfree };
+    if (client.sha256 != sha256.get())
+        throw UnauthorizedException("authentication failure");
 }
 
 App::Flow<Hold<json_thing_t>>

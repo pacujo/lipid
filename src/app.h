@@ -44,6 +44,17 @@ private:
     int errcode_;
 };
 
+class UnauthorizedException : public std::exception {
+public:
+    UnauthorizedException(std::string reason) : reason_ { reason } {}
+    const char *what() const noexcept override {
+        return reason_.c_str();
+    }
+
+private:
+    std::string reason_;
+};
+
 struct UserSettings {
     std::string nick;
     std::string name;
@@ -59,9 +70,16 @@ struct Local {
     std::string private_key;
 };
 
+struct Client {
+    std::string salt;
+    // base64(sha256(salt + "\n" + secret + "\n"))
+    std::string sha256;
+};
+
 struct Config {
     std::map<std::string, UserSettings> settings;
     std::vector<Local> local;
+    std::map<std::string, Client> clients;
     struct {
         std::string address { "irc.oftc.net" };
         int port { 6697 };
@@ -115,6 +133,8 @@ private:
     std::map<int64_t, Session> sessions_;
 
     void read_configuration(std::filesystem::path config_file);
+    void add_locals(json_thing_t *locals);
+    void add_clients(json_thing_t *clients);
     Task run_server();
     Task resolve_addresses(const pacujo::cordial::Thunk *notify);
     Future<AddrInfo> resolve_address(const pacujo::cordial::Thunk *notify,
@@ -123,6 +143,8 @@ private:
     Task run_session(const pacujo::cordial::Thunk *notify,
                      pacujo::etc::Hold<tcp_conn_t> tcp_conn,
                      const Local &local);
+    bool authorized(std::optional<pacujo::etc::Hold<json_thing_t>> login_req);
+    void authorize(std::optional<pacujo::etc::Hold<json_thing_t>> login_req);
     Flow<pacujo::etc::Hold<json_thing_t>>
     get_request(const pacujo::cordial::Thunk *notify,
                 jsonyield_t *requests);
