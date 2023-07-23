@@ -35,6 +35,7 @@ using std::endl;
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
 using pacujo::etc::Hold;
+using pacujo::etc::Keep;
 using pacujo::net::SocketAddress;
 
 using namespace std::chrono_literals;
@@ -150,9 +151,9 @@ App::Task App::run_server()
     vector<Task> holder;
     for (auto &local : config_.local)
         for (auto &res : local.resolutions)
-            holder.push_back(serve(res, local));
+            holder.push_back(serve(wakeup, res, local));
     for (auto &_ : holder)
-        co_await suspend;
+        co_await suspend;       // TODO: call await_resume()
 }
 
 App::Task App::resolve_addresses(const Thunk *notify)
@@ -207,9 +208,10 @@ App::Future<AddrInfo> App::resolve_address(const Thunk *notify,
     }
 }
 
-App::Task App::serve(const SocketAddress &address, const Local &local)
+App::Task App::serve(const Thunk *notify, const SocketAddress &address,
+                     const Local &local)
 {
-    auto wakeup { co_await intro<Task::introspect>() };
+    auto wakeup { co_await intro<Task::introspect>(notify) };
     Hold<tcp_server_t> tcp_server {
         tcp_listen(get_async(),
                    reinterpret_cast<const sockaddr *>(&address.address),
@@ -234,8 +236,17 @@ App::Task App::serve(const SocketAddress &address, const Local &local)
         { tcp_server.get(), tcp_unregister_server_callback };
     for (;;) {
         for (auto key : notifications)
-            if (key >= 0)
-                sessions_.erase(sessions_.find(key));
+            if (key >= 0) {
+                auto it { sessions_.find(key) };
+                try {
+                    it->second.get_task()->await_resume();
+                    cerr << "session " << key << " ended" << endl;
+                } catch (const exception &e) {
+                    cerr << "session " << key << " crashed: "
+                         << e.what() << endl;
+                }
+                sessions_.erase(it);
+            }
         notifications.clear();
         for (;;) {
             Hold<tcp_conn_t> tcp_conn
@@ -296,6 +307,7 @@ public:
             jsonyield_close
         }
     {
+        tls_suppress_ragged_eofs(tls_conn_.get());
         tls_set_plain_output_stream(tls_conn_.get(),
                                     ByteStream { responses_.get() });
         tcp_set_output_stream(tcp_conn_.get(),
@@ -312,32 +324,81 @@ private:
     Hold<jsonyield_t> requests_;
 };
 
+class ServerStack {
+public:
+    ServerStack(async_t *async, Hold<tcp_conn_t> tcp_conn,
+                const string &server_hostname) :
+        tcp_conn_ { std::move(tcp_conn) },
+        tls_conn_ {
+            open_tls_client_2(async, 
+                              tcp_get_input_stream(tcp_conn_.get()),
+                              TLS_SYSTEM_CA_BUNDLE,
+                              server_hostname.c_str()),
+            tls_close
+        },
+        requests_ { make_queuestream(async),  queuestream_terminate },
+        responses_ {
+            tls_get_plain_input_stream(tls_conn_.get()),
+            bytestream_1_close
+        }
+    {
+        tls_suppress_ragged_eofs(tls_conn_.get());
+        tls_set_plain_output_stream(tls_conn_.get(),
+                                    ByteStream { requests_.get() });
+        tcp_set_output_stream(tcp_conn_.get(),
+                              tls_get_encrypted_output_stream(tls_conn_.get()));
+    }
+
+    queuestream_t *get_requests() const { return requests_.get(); }
+    bytestream_1 get_responses() const { return responses_.get(); }
+
+private:
+    Hold<tcp_conn_t> tcp_conn_;
+    Hold<tls_conn_t> tls_conn_;
+    Hold<queuestream_t> requests_;
+    Keep<bytestream_1> responses_;
+};
+
 App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                            const Local &local)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
-    ClientStack stack(get_async(), std::move(tcp_conn), local);
-    auto source { get_request(wakeup, stack.get_requests()) };
-    auto login_req { co_await source };
+    ClientStack client_stack { get_async(), std::move(tcp_conn), local };
+    Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx(wakeup);
+    auto req_flow
+        { get_request(mx.wakeup_left(), client_stack.get_requests()) };
+    auto login_req { co_await req_flow };
     if (!authorized(std::move(login_req))) {
         cerr << "client unauthorized" << endl;
         co_await delay(wakeup, 3s);
         co_return;
     }
-#if 0
-    Hold<queuestream_t> irc_commands
-        { make_queuestream(get_async()), queuestream_terminate };
-#endif
     auto irc_conn { co_await connect_to_server(wakeup) };
+    ServerStack server_stack
+        { get_async(), std::move(irc_conn), config_.irc_server.address };
+    auto resp_flow
+        { get_response(mx.wakeup_right(), server_stack.get_responses()) };
     Hold<json_thing_t> login_resp { json_make_object(), json_destroy_thing };
     json_add_to_object(login_resp.get(), "type", json_make_string("login"));
-    send(stack.get_responses(), login_resp.get());
+    send(client_stack.get_responses(), login_resp.get());
     for (;;) {
-        auto request { co_await source };
-        if (!request)
-            break;
-        // echo back
-        send(stack.get_responses(), request->get());
+        auto result { co_await mx.tie(&req_flow, &resp_flow) };
+        if (got_left(result)) {
+            auto &request { get_left(result) };
+            if (!request) {
+                cerr << "client bailed" << endl;
+                break;
+            }
+            // echo back
+            send(client_stack.get_responses(), request->get());
+        } else {
+            auto response { get_right(result) };
+            if (!response) {
+                cerr << "server bailed" << endl;
+                break;
+            }
+            cout << "server: " << *response << endl;
+        }
     }
 }
 
@@ -435,6 +496,35 @@ void App::send(queuestream_t *qstr, json_thing_t *msg)
     ByteStream encoder { json_encode(get_async(), msg) };
     ByteStream framer { naive_encode(get_async(), encoder, 0, 0) };
     queuestream_enqueue(qstr, framer);
+}
+
+App::Flow<string>
+App::get_response(const Thunk *notify, bytestream_1 responses)
+{
+    auto wakeup { co_await intro<Flow<string>::introspect>(notify) };
+    bytestream_1_register_callback(responses, thunk_to_action(wakeup));
+    Keep<bytestream_1> dereg { responses, bytestream_1_unregister_callback };
+    string response;
+    for (;;) {
+        char buffer[1100];
+        auto count { bytestream_1_read(responses, buffer, sizeof buffer) };
+        if (count > 0) {
+            response.append(buffer, count);
+            for (;;) {
+                auto loc { response.find("\r\n") };
+                if (loc == string::npos)
+                    break;
+                co_yield response.substr(0, loc);
+                response = response.substr(loc + 2);
+            }
+        } else if (count == 0) {
+            if (response.length() > 0)
+                throw ConnectionBrokenException();
+            co_return;
+        } else if (errno != EAGAIN)
+            throw_errno();
+        else co_await suspend;
+    }
 }
 
 static void parse_cmdline(int argc, char **argv, Opts &opts)

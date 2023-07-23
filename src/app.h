@@ -56,6 +56,13 @@ private:
     std::string reason_;
 };
 
+class ConnectionBrokenException : public std::exception {
+public:
+    const char *what() const noexcept override {
+        return "connection broken";
+    }
+};
+
 struct UserSettings {
     std::string nick;
     std::string name;
@@ -119,6 +126,7 @@ private:
         Session(Session &&other) = default;
         Session &operator=(Session &&other) = default;
         void set_task(Task &&task) { task_ = std::move(task); }
+        std::optional<Task> &get_task() { return task_; }
         const pacujo::cordial::Thunk *get_wakeup() const { return &wakeup_; }
     private:
         pacujo::cordial::Thunk wakeup_;
@@ -139,7 +147,8 @@ private:
     Task resolve_addresses(const pacujo::cordial::Thunk *notify);
     Future<AddrInfo> resolve_address(const pacujo::cordial::Thunk *notify,
                                      const std::string &address);
-    Task serve(const pacujo::net::SocketAddress &address, const Local &local);
+    Task serve(const pacujo::cordial::Thunk *notify,
+               const pacujo::net::SocketAddress &address, const Local &local);
     Task run_session(const pacujo::cordial::Thunk *notify,
                      pacujo::etc::Hold<tcp_conn_t> tcp_conn,
                      const Local &local);
@@ -151,4 +160,6 @@ private:
     get_request(const pacujo::cordial::Thunk *notify,
                 jsonyield_t *requests);
     void send(queuestream_t *q, json_thing_t *msg);
+    Flow<std::string> get_response(const pacujo::cordial::Thunk *notify,
+                                   bytestream_1 responses);
 };
