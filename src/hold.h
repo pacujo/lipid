@@ -20,4 +20,19 @@ private:
     std::unique_ptr<T, std::function<void(T *)>> ptr_;
 };
 
+/* Like Hold but for a non-pointer handle. */
+template<typename T>
+class Keep {
+public:
+    Keep(T handle, std::function<void(T)> release) :
+        handle_ { handle }, release_ { release } {}
+    Keep(Keep &&other) = default;
+    Keep &operator=(Keep &&other) = default;
+    ~Keep() { release_(handle_); }
+    T get() const { return handle_; }
+private:
+    T handle_;
+    std::function<void(T)> release_;
+};
+
 };
