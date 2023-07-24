@@ -58,9 +58,12 @@ private:
 
 class ConnectionBrokenException : public std::exception {
 public:
-    const char *what() const noexcept override {
-        return "connection broken";
-    }
+    const char *what() const noexcept override { return "connection broken"; }
+};
+
+class OverlongMessageException : public std::exception {
+public:
+    const char *what() const noexcept override { return "overlong message"; }
 };
 
 struct UserSettings {
@@ -159,6 +162,14 @@ private:
     Flow<pacujo::etc::Hold<json_thing_t>>
     get_request(const pacujo::cordial::Thunk *notify,
                 jsonyield_t *requests);
+    void process_client_request(queuestream_t *responses,
+                                json_thing_t *request,
+                                queuestream_t *requests);
+    void process_nick_request(queuestream_t *responses, json_thing_t *request,
+                              queuestream_t *requests);
+    void emit(queuestream_t *requests, const std::string &text);
+    void reject_request(queuestream_t *responses, const std::string &reason);
+    pacujo::etc::Hold<json_thing_t> make_response(const std::string &type);
     void send(queuestream_t *q, json_thing_t *msg);
     Flow<std::string> get_response(const pacujo::cordial::Thunk *notify,
                                    bytestream_1 responses);

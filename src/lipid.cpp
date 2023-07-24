@@ -8,6 +8,7 @@
 #include <async/tcp_client.h>
 #include <async/tls_connection.h>
 #include <async/queuestream.h>
+#include <async/stringstream.h>
 #include <async/jsonyield.h>
 #include <async/jsonencoder.h>
 #include <async/naiveencoder.h>
@@ -378,8 +379,7 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
         { get_async(), std::move(irc_conn), config_.irc_server.address };
     auto resp_flow
         { get_response(mx.wakeup_right(), server_stack.get_responses()) };
-    Hold<json_thing_t> login_resp { json_make_object(), json_destroy_thing };
-    json_add_to_object(login_resp.get(), "type", json_make_string("login"));
+    auto login_resp { make_response("login") };
     send(client_stack.get_responses(), login_resp.get());
     for (;;) {
         auto result { co_await mx.tie(&req_flow, &resp_flow) };
@@ -389,8 +389,9 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                 cerr << "client bailed" << endl;
                 break;
             }
-            // echo back
-            send(client_stack.get_responses(), request->get());
+            process_client_request(client_stack.get_responses(),
+                                   request->get(),
+                                   server_stack.get_requests());
         } else {
             auto response { get_right(result) };
             if (!response) {
@@ -491,6 +492,74 @@ App::get_request(const Thunk *notify, jsonyield_t *requests)
     }
 }
 
+void App::process_client_request(queuestream_t *responses,
+                                 json_thing_t *request,
+                                 queuestream_t *requests)
+{
+    if (json_thing_type(request) != JSON_OBJECT) {
+        reject_request(responses, "request not an object");
+        return;
+    }
+    const char *type;
+    if (!json_object_get_string(request, "type", &type)) {
+        reject_request(responses, "no request type");
+        return;
+    }
+    string msg_type { type };
+    if (msg_type == "nick")
+        process_nick_request(responses, request, requests);
+    else reject_request(responses, "unknown request type");
+}
+
+void App::process_nick_request(queuestream_t *responses, json_thing_t *request,
+                               queuestream_t *requests)
+{
+    const char *nick;
+    if (!json_object_get_string(request, "nick", &nick)) {
+        reject_request(responses, "nick missing");
+        return;
+    }        
+    const char *user;
+    if (!json_object_get_string(request, "user", &user)) {
+        reject_request(responses, "user missing");
+        return;
+    }
+    emit(requests, "NICK ");
+    emit(requests, nick);
+    emit(requests, " \r\n");
+    emit(requests, "USER ");
+    emit(requests, nick);
+    emit(requests, " 0 * :");
+    emit(requests, user);
+    emit(requests, "\r\n");
+    auto response { make_response("nick") };
+    send(responses, response.get());
+}
+
+FSTRACE_DECL(IRC_EMIT, "TEXT=%s");
+
+void App::emit(queuestream_t *requests, const string &text)
+{
+    FSTRACE(IRC_EMIT, text.c_str());
+    stringstream_t *sstr = copy_stringstream(get_async(), text.c_str());
+    queuestream_enqueue(requests, stringstream_as_bytestream_1(sstr));
+}
+
+void App::reject_request(queuestream_t *responses, const string &reason)
+{
+    auto response { make_response("bad-request") };
+    json_add_to_object(response.get(), "reason",
+                       json_make_string(reason.c_str()));
+    send(responses, response.get());
+}
+
+Hold<json_thing_t> App::make_response(const string &type)
+{
+    Hold<json_thing_t> response { json_make_object(), json_destroy_thing };
+    json_add_to_object(response.get(), "type", json_make_string(type.c_str()));
+    return response;
+}
+
 void App::send(queuestream_t *qstr, json_thing_t *msg)
 {
     ByteStream encoder { json_encode(get_async(), msg) };
@@ -517,6 +586,8 @@ App::get_response(const Thunk *notify, bytestream_1 responses)
                 co_yield response.substr(0, loc);
                 response = response.substr(loc + 2);
             }
+            if (response.length() > 1500)
+                throw OverlongMessageException();
         } else if (count == 0) {
             if (response.length() > 0)
                 throw ConnectionBrokenException();
