@@ -187,7 +187,7 @@ public:
         Future(Future &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
         }
-        Future &operator=(Task &&other) {
+        Future &operator=(Future &&other) {
             handle_ = other.handle_;
             other.handle_ = nullptr;
             return *this;
@@ -237,7 +237,7 @@ public:
         Flow(Flow &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
         }
-        Flow &operator=(Task &&other) {
+        Flow &operator=(Flow &&other) {
             handle_ = other.handle_;
             other.handle_ = nullptr;
             return *this;
@@ -257,13 +257,17 @@ public:
         Multiplex(const Thunk *wakeup) :
             wakeup_left_ {
                 [this, wakeup]() {
-                    choice_ = LEFT;
+                    /* Allow awaiting the left leg separately before
+                     * the right leg is available for tying. */
+                    if (left_state_ == PENDING)
+                        left_state_ = DONE;
                     (*wakeup)();
                 }
             },
             wakeup_right_ {
                 [this, wakeup]() {
-                    choice_ = RIGHT;
+                    assert(right_state_ == PENDING);
+                    right_state_ = DONE;
                     (*wakeup)();
                 }
             }
@@ -275,37 +279,40 @@ public:
             right_coro_ = right_coro;
             return *this;
         }
-        bool await_ready() { return false; }
+        bool await_ready() {
+            return left_state_ == DONE || right_state_ == DONE;
+        }
         void await_suspend(std::coroutine_handle<>) {
-            if (suspend_left_) {
+            if (left_state_ == IDLE) {
+                left_state_ = PENDING;
                 left_coro_->await_suspend();
-                suspend_left_ = false;
             }
-            if (suspend_right_) {
+            if (right_state_ == IDLE) {
+                right_state_ = PENDING;
                 right_coro_->await_suspend();
-                suspend_right_ = false;
             }
         }
         decltype(auto) await_resume() {
-            using ret_t =
-                Either<decltype(left_coro_->await_resume()),
-                       decltype(right_coro_->await_resume())>;
-            if (choice_ == LEFT) {
-                suspend_left_ = true;
+            using ret_t = Either<decltype(left_coro_->await_resume()),
+                                 decltype(right_coro_->await_resume())>;
+            if (left_state_ == DONE) {
+                left_state_ = IDLE;
                 return ret_t(LEFT, left_coro_->await_resume());
             }
-            suspend_right_ = true;
+            assert(right_state_ == DONE);
+            right_state_ = IDLE;
             return ret_t(RIGHT, right_coro_->await_resume());
         }
 
     private:
-        Choice choice_;
+        enum HalfState { IDLE, PENDING, DONE };
+
+        HalfState left_state_ { IDLE };
+        HalfState right_state_ { IDLE };
         Thunk wakeup_left_;
         Thunk wakeup_right_;
         Left *left_coro_;
         Right *right_coro_;
-        bool suspend_left_ { true };
-        bool suspend_right_ { true };
     };
 
     template<typename Left, typename Right>
