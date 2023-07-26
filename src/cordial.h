@@ -16,9 +16,6 @@ void throw_errno [[noreturn]] () {
 
 struct Nothing {};
 
-template<typename Left, typename Right>
-using Either = std::pair<int, std::variant<Left, Right>>;
-
 class Framework {
 public:
     virtual ~Framework() {}
@@ -249,8 +246,6 @@ public:
         std::coroutine_handle<promise_type> handle_ {};
     };
 
-    enum Choice { LEFT, RIGHT };
-
     template<typename Left, typename Right>
     class Multiplex {
     public:
@@ -293,18 +288,41 @@ public:
             }
         }
         decltype(auto) await_resume() {
-            using ret_t = Either<decltype(left_coro_->await_resume()),
-                                 decltype(right_coro_->await_resume())>;
+            using LeftVal = decltype(left_coro_->await_resume());
+            using RightVal = decltype(right_coro_->await_resume());
+
             if (left_state_ == DONE) {
                 left_state_ = IDLE;
-                return ret_t(LEFT, left_coro_->await_resume());
+                std::variant<LeftVal, RightVal> value
+                    { std::in_place_index<LEFT>, left_coro_->await_resume() };
+                return Either<LeftVal, RightVal> { std::move(value) };
             }
             assert(right_state_ == DONE);
             right_state_ = IDLE;
-            return ret_t(RIGHT, right_coro_->await_resume());
+            std::variant<LeftVal, RightVal> value
+                { std::in_place_index<RIGHT>, right_coro_->await_resume() };
+            return Either<LeftVal, RightVal> { std::move(value) };
         }
 
     private:
+        enum Choice { LEFT, RIGHT };
+        
+        template<typename LeftVal, typename RightVal>
+        class Either {
+        public:
+            Either(std::variant<LeftVal, RightVal> value) :
+                value_ { std::move(value) } {}
+            bool got_left() const { return value_.index() == LEFT; }
+            bool got_right() const { return value_.index() == RIGHT; }
+            const LeftVal &get_left() const { return std::get<LEFT>(value_); }
+            const RightVal &get_right() const {
+                return std::get<RIGHT>(value_);
+            }
+            
+        private:
+            std::variant<LeftVal, RightVal> value_;
+        };
+
         enum HalfState { IDLE, PENDING, DONE };
 
         HalfState left_state_ { IDLE };
@@ -314,30 +332,6 @@ public:
         Left *left_coro_;
         Right *right_coro_;
     };
-
-    template<typename Left, typename Right>
-    static bool got_left(const Either<Left, Right> &value) {
-        auto &[choice, _] = value;
-        return choice == LEFT;
-    }
-
-    template<typename Left, typename Right>
-    static bool got_right(const Either<Left, Right> &value) {
-        auto &[choice, _] = value;
-        return choice == RIGHT;
-    }
-
-    template<typename Left, typename Right>
-    static decltype(auto) get_left(const Either<Left, Right> &value) {
-        auto &[_, body] = value;
-        return std::get<LEFT>(body);
-    }
-
-    template<typename Left, typename Right>
-    static decltype(auto) get_right(const Either<Left, Right> &value) {
-        auto &[_, body] = value;
-        return std::get<RIGHT>(body);
-    }
 
     virtual Thunk executor(const Thunk *function) = 0;
     virtual void dispose(Disposable *disposable) = 0;

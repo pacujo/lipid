@@ -394,8 +394,8 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     send(client_stack.get_responses(), login_resp.get());
     for (;;) {
         auto result { co_await mx.tie(&req_flow, &resp_flow) };
-        if (got_left(result)) {
-            auto &request { get_left(result) };
+        if (result.got_left()) {
+            auto &request { result.get_left() };
             if (!request) {
                 cerr << "client bailed" << endl;
                 break;
@@ -404,8 +404,8 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                                    request->get(),
                                    server_stack.get_requests());
         } else {
-            assert(got_right(result));
-            auto response { get_right(result) };
+            assert(result.got_right());
+            auto &response { result.get_right() };
             if (!response) {
                 cerr << "server bailed" << endl;
                 break;
