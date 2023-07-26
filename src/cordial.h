@@ -290,39 +290,21 @@ public:
         decltype(auto) await_resume() {
             using LeftVal = decltype(left_coro_->await_resume());
             using RightVal = decltype(right_coro_->await_resume());
+            using Either = std::variant<LeftVal, RightVal>;
 
             if (left_state_ == DONE) {
                 left_state_ = IDLE;
-                std::variant<LeftVal, RightVal> value
+                return Either
                     { std::in_place_index<LEFT>, left_coro_->await_resume() };
-                return Either<LeftVal, RightVal> { std::move(value) };
             }
             assert(right_state_ == DONE);
             right_state_ = IDLE;
-            std::variant<LeftVal, RightVal> value
+            return Either
                 { std::in_place_index<RIGHT>, right_coro_->await_resume() };
-            return Either<LeftVal, RightVal> { std::move(value) };
         }
 
-    private:
         enum Choice { LEFT, RIGHT };
-        
-        template<typename LeftVal, typename RightVal>
-        class Either {
-        public:
-            Either(std::variant<LeftVal, RightVal> value) :
-                value_ { std::move(value) } {}
-            bool got_left() const { return value_.index() == LEFT; }
-            bool got_right() const { return value_.index() == RIGHT; }
-            const LeftVal &get_left() const { return std::get<LEFT>(value_); }
-            const RightVal &get_right() const {
-                return std::get<RIGHT>(value_);
-            }
-            
-        private:
-            std::variant<LeftVal, RightVal> value_;
-        };
-
+    private:
         enum HalfState { IDLE, PENDING, DONE };
 
         HalfState left_state_ { IDLE };

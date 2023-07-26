@@ -374,9 +374,11 @@ private:
 App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                            const Local &local)
 {
+    using Mx = Multiplex<Flow<Hold<json_thing_t>>, Flow<string>>;
+
     auto wakeup { co_await intro<Task::introspect>(notify) };
     ClientStack client_stack { get_async(), std::move(tcp_conn), local };
-    Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx(wakeup);
+    Mx mx(wakeup);
     auto req_flow
         { get_requests(mx.wakeup_left(), client_stack.get_requests()) };
     auto login_req { co_await req_flow };
@@ -394,8 +396,8 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     send(client_stack.get_responses(), login_resp.get());
     for (;;) {
         auto result { co_await mx.tie(&req_flow, &resp_flow) };
-        if (result.got_left()) {
-            auto &request { result.get_left() };
+        if (result.index() == Mx::LEFT) {
+            auto &request { std::get<Mx::LEFT>(result) };
             if (!request) {
                 cerr << "client bailed" << endl;
                 break;
@@ -404,8 +406,8 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                                    request->get(),
                                    server_stack.get_requests());
         } else {
-            assert(result.got_right());
-            auto &response { result.get_right() };
+            assert(result.index() == Mx::RIGHT);
+            auto &response { std::get<Mx::RIGHT>(result) };
             if (!response) {
                 cerr << "server bailed" << endl;
                 break;
