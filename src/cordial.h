@@ -6,21 +6,53 @@
 
 namespace pacujo::cordial {
 
+/**
+ * A parameterless lambda.
+ */
 using Thunk = std::function<void()>;
 
+/**
+ * A utility function for converting an `errno` value to an exception
+ * with a single string argument.
+ */
 void throw_errno [[noreturn]] (const std::string &what_arg) {
     throw std::system_error(errno, std::generic_category(), what_arg);
 }
+
+/**
+ * A utility function for converting an `errno` value to an exception
+ * without an extra argument.
+ */
 void throw_errno [[noreturn]] () {
     throw std::system_error(errno, std::generic_category());
 }
 
+/**
+ * A technical synonym for `void`. Needed in contexts where `void` is
+ * not allowed as a placeholder type.
+ */
 struct Nothing {};
 
+/**
+ * A header-only, generic, abstract coroutine framework made from the
+ * C++ coroutine building blocks.
+ * 
+ * A number of virtual functions need to be provided by the concrete
+ * framework.
+ */
 class Framework {
 public:
     virtual ~Framework() {}
 
+    /**
+     * A reference-counting structure to support callbacks from the
+     * "background" after a coroutine has been deallocated.
+     *
+     * Its function is analogous to the standard smart pointers, but
+     * it has technical advantages. In particular, a simple pointer
+     * can be passed on to the concrete (C?) framework for deletion in
+     * the background.
+     */
     class Disposable {
     public:
         virtual ~Disposable() {}
@@ -37,6 +69,9 @@ public:
         unsigned use_count_ { 1 };
     };
 
+    /**
+     * Commonalities between `Task`, `Future` and `Flow` coroutines.
+     */
     class BasePromiseType {
     public:
         std::suspend_always final_suspend() noexcept {
@@ -72,6 +107,10 @@ public:
         Disposable *companion_;
     };
 
+    /**
+     * A "zombie" structure left behind after a coroutine has been
+     * deallocated but callbacks are still pending.
+     */
     template<typename PromiseType>
     class Companion : public Disposable {
     public:
@@ -98,6 +137,11 @@ public:
         Thunk lazy_wakeup_;
     };
 
+    /**
+     * A class used by the `intro` boilerplate.
+     *
+     * @see intro(const Thunk *)
+     */
     template<typename PromiseType>
     class Introspect {
     public:
@@ -120,6 +164,11 @@ public:
         const Thunk *notify_;
     };
 
+    /**
+     * A coroutine returning `Task` performs an operation and
+     * (possibly) completes without a return value. The technical
+     * return type `Nothing` is equivalent with `void`.
+     */
     class Task {
     public:
         struct promise_type : public BasePromiseType {
@@ -155,6 +204,10 @@ public:
         std::coroutine_handle<promise_type> handle_ {};
     };
 
+    /**
+     * A coroutine returning `Future` produces a single result via
+     * `co_return EXPR`.
+     */
     template<typename Result>
     class Future {
     public:
@@ -198,6 +251,14 @@ public:
         std::coroutine_handle<promise_type> handle_ {};
     };
 
+    /**
+     * A coroutine returning `Flow` produces a number results with
+     * `co_yield` and (optionally) finishes.
+     *
+     * The caller receives the results wrapped in `std::optional`.
+     * When the flow finishes, `nullopt` is produced. The flow should
+     * not be awaited again afterward.
+     */
     template<typename Result>
     class Flow {
     public:
@@ -247,9 +308,34 @@ public:
         std::coroutine_handle<promise_type> handle_ {};
     };
 
+    /**
+     * Multiplex a number of other, "participating" coroutines. The
+     * Multiplex object can be awaited (with `co_await` or by calling
+     * the standard await routines directly), and it resumes whenever
+     * any of the participating coroutines yields or returns.
+     *
+     * The setup is a multistep process:
+     *
+     *     Multiplex<Task, Future<string>, Flow<int>> mx(wakeup);
+     *     auto task { do_it(mx.wakeup(0) };
+     *     auto future { find_out(mx.wakeup(1) };
+     *     auto flow { pour_it(mx.wakeup(2) };
+     *     for (;;) {
+     *          auto result { co_await mx.tie(&task, &future, &flow) };
+     *          if (result.index() == 0) {
+     *              auto &value { std::get<0>(result) };
+     *                 :       :       :
+     */
     template<typename... Coros>
     class Multiplex {
     public:
+
+        /**
+         * The constructor takes the wakeup thunk of the calling
+         * coroutine.
+         *
+         * Participating coroutines can then be instantiated and tied.
+         */
         Multiplex(const Thunk *wakeup) {
             for (auto i = 0; i < legs_.size(); i++)
                 legs_[i].wakeup = [this, wakeup, i]() {
@@ -258,11 +344,39 @@ public:
                     (*wakeup)();
                 };
         }
+
+        /**
+         * Participating coroutines must be instantiated (called) with
+         * a wakeup thunk returned by this method. The coroutine can
+         * still be used independently until it is tied for the first
+         * time.
+         *
+         * @see tie(Coros *...)
+         */
         const Thunk *wakeup(std::size_t i) const { return &legs_[i].wakeup; }
+
+        /**
+         * Assign the participating coroutines. The coroutines can be
+         * used independently before they are tied. However, once a
+         * coroutine has been tied, it can no longer be used outside
+         * the Multiplex object's context.
+         *
+         * `nullptr` can take the place of a coroutine until it is
+         * tied for the first time. Also, once a coroutine has
+         * finished, `nullptr` should be used in its staid
+         * subsequently.
+         *
+         * You can tie the participating coroutines once and await the
+         * Multiplex object itself, or you can tie repeatedly and
+         * await the return value. However, you must always specify
+         * the same coroutine in the same position (or replace it with
+         * `nullptr` as described above).
+         */
         Multiplex &tie(Coros *... coros) {
             coros_ = std::tie(coros...);
             return *this;
         }
+
         bool await_ready() {
             for (const auto &leg : legs_)
                 if (leg.state == DONE)
@@ -273,6 +387,16 @@ public:
             await_suspend_tpl();
         }
 
+        /**
+         * The coroutine results are returned one at a time using this
+         * variant type. The variant index corresponds to the index of
+         * the participating coroutine. And the type matches that of
+         * the coroutine.
+         *
+         * No fairness is guaranteed. A flow that keeps producing
+         * results may prevent other coroutines from communicating
+         * their results.
+         */
         using Result = std::variant<
             decltype(reinterpret_cast<Coros *>(0)->await_resume())...>;
 
@@ -281,6 +405,15 @@ public:
         }
 
     private:
+
+        /**
+         * Every participating coroutine ("leg") rotates through these
+         * three states. When the Multiplex object is suspended (via
+         * `co_await`), the legs move from `IDLE` to `PENDING`. As
+         * legs finish, they move from `PENDING` to `DONE`. Finally,
+         * as the result of the leg is relayed to the caller, it is
+         * moved back from `DONE` to `IDLE`.
+         */
         enum State { IDLE, PENDING, DONE };
 
         struct Leg {
@@ -328,14 +461,49 @@ public:
         }
     };
 
+    /**
+     * Produce a thunk that, when called, "backgrounds" the execution
+     * of another thunk (`function`). The returned thunk can be called
+     * any number of times as long as `function` exists.
+     */
     virtual Thunk executor(const Thunk *function) = 0;
+
+    /**
+     * "Background" the deletion of the given disposable object to
+     * avoid the questionable `delete this` statement.
+     */
     virtual void dispose(Disposable *disposable) = 0;
 
+    /**
+     * The mandatory introductory command in any Task, Future or Flow
+     * in this framework. It is used to form the necessary
+     * interconnects between coroutines.
+     *
+     * The typical coroutine is called with a notification thunk
+     * ("notify") that is used to handshake with the caller/owner of
+     * the coroutine. The intro call produces another thunk ("wakeup")
+     * that is used between the subsidiary coroutines of the current
+     * coroutine.
+     *
+     * Thus, a coroutine could begin like this:
+     *
+     *     Task my_task(const Thunk *notify)
+     *     {
+     *         auto wakeup { co_await intro<Task::introspect>(notify) };
+     *         co_await other_task(wakeup);
+     *         auto result { co_await random(wakeup) };
+     *              :     :     :
+     *     }
+     */
     template<typename Introspect>
     Introspect intro(const Thunk *notify = nullptr) {
         return Introspect { this, notify ?: &no_op};
     }
 
+    /**
+     * Suspend the current coroutine for the given duration, which
+     * must support std::chrono::duration_cast.
+     */
     template<typename Duration>
     Task delay(const Thunk *notify, Duration duration) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>
@@ -343,11 +511,26 @@ public:
         return delay_ns(notify, ns);
     }
 
+    /**
+     * Cede the CPU to other coroutines and resume without delay. Used
+     * to prevent CPU starvation.
+     */
     virtual Task reschedule(const Thunk *notify) = 0;
 
 private:
+
+    /**
+     * An auxiliary task that blocks for the given number of
+     * nanoseconds.
+     *
+     * @see delay(const Thunk *, Duration)
+     */
     virtual Task delay_ns(const Thunk *notify, uint64_t ns) = 0;
 
+    /**
+     * A dummy thunk. It is not static so a separate source code file
+     * is not needed.
+     */
     Thunk no_op = [](){};
 };
 
