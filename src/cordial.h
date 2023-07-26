@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <coroutine>
 #include <optional>
 
@@ -246,73 +247,85 @@ public:
         std::coroutine_handle<promise_type> handle_ {};
     };
 
-    template<typename Left, typename Right>
+    template<typename... Coros>
     class Multiplex {
     public:
-        Multiplex(const Thunk *wakeup) :
-            wakeup_left_ {
-                [this, wakeup]() {
-                    /* Allow awaiting the left leg separately before
-                     * the right leg is available for tying. */
-                    if (left_state_ == PENDING)
-                        left_state_ = DONE;
+        Multiplex(const Thunk *wakeup) {
+            for (auto i = 0; i < legs_.size(); i++)
+                legs_[i].wakeup = [this, wakeup, i]() {
+                    if (legs_[i].state == PENDING)
+                        legs_[i].state = DONE;
                     (*wakeup)();
-                }
-            },
-            wakeup_right_ {
-                [this, wakeup]() {
-                    assert(right_state_ == PENDING);
-                    right_state_ = DONE;
-                    (*wakeup)();
-                }
-            }
-        {}
-        const Thunk *wakeup_left() const { return &wakeup_left_; }
-        const Thunk *wakeup_right() const { return &wakeup_right_; }
-        Multiplex &tie(Left *left_coro, Right *right_coro) {
-            left_coro_ = left_coro;
-            right_coro_ = right_coro;
+                };
+        }
+        const Thunk *wakeup(std::size_t i) const { return &legs_[i].wakeup; }
+        Multiplex &tie(Coros *... coros) {
+            coros_ = std::tie(coros...);
             return *this;
         }
         bool await_ready() {
-            return left_state_ == DONE || right_state_ == DONE;
+            for (const auto &leg : legs_)
+                if (leg.state == DONE)
+                    return true;
+            return false;
         }
         void await_suspend(std::coroutine_handle<>) {
-            if (left_state_ == IDLE) {
-                left_state_ = PENDING;
-                left_coro_->await_suspend();
-            }
-            if (right_state_ == IDLE) {
-                right_state_ = PENDING;
-                right_coro_->await_suspend();
-            }
-        }
-        decltype(auto) await_resume() {
-            using LeftVal = decltype(left_coro_->await_resume());
-            using RightVal = decltype(right_coro_->await_resume());
-            using Either = std::variant<LeftVal, RightVal>;
-
-            if (left_state_ == DONE) {
-                left_state_ = IDLE;
-                return Either
-                    { std::in_place_index<LEFT>, left_coro_->await_resume() };
-            }
-            assert(right_state_ == DONE);
-            right_state_ = IDLE;
-            return Either
-                { std::in_place_index<RIGHT>, right_coro_->await_resume() };
+            await_suspend_tpl();
         }
 
-        enum Choice { LEFT, RIGHT };
+        using Result = std::variant<
+            decltype(reinterpret_cast<Coros *>(0)->await_resume())...>;
+
+        Result await_resume() {
+            return await_resume_tpl();
+        }
+
     private:
-        enum HalfState { IDLE, PENDING, DONE };
+        enum State { IDLE, PENDING, DONE };
 
-        HalfState left_state_ { IDLE };
-        HalfState right_state_ { IDLE };
-        Thunk wakeup_left_;
-        Thunk wakeup_right_;
-        Left *left_coro_;
-        Right *right_coro_;
+        struct Leg {
+            State state { IDLE };
+            Thunk wakeup;
+        };
+
+        std::array<Leg, sizeof...(Coros)> legs_;
+        std::tuple<Coros *...> coros_;
+
+        template<std::size_t I = 0>
+        inline typename std::enable_if<I < sizeof...(Coros), void>::type
+        await_suspend_tpl() {
+            if (legs_[I].state == IDLE) {
+                auto coro { std::get<I>(coros_) };
+                if (coro != nullptr) {
+                    legs_[I].state = PENDING;
+                    coro->await_suspend();
+                }
+            }
+            await_suspend_tpl<I + 1>();
+        }
+
+        template<std::size_t I = 0>
+        inline typename std::enable_if<I == sizeof...(Coros), void>::type
+        await_suspend_tpl() {}
+
+        template<std::size_t I = 0>
+        inline typename std::enable_if<I < sizeof...(Coros), Result>::type
+        await_resume_tpl() {
+            if (legs_[I].state == DONE) {
+                legs_[I].state = IDLE;
+                return Result {
+                    std::in_place_index<I>,
+                    std::get<I>(coros_)->await_resume()
+                };
+            }
+            return await_resume_tpl<I + 1>();
+        }
+
+        template<std::size_t I = 0>
+        inline typename std::enable_if<I == sizeof...(Coros), Result>::type
+        await_resume_tpl() {
+            assert(false);
+        }
     };
 
     virtual Thunk executor(const Thunk *function) = 0;

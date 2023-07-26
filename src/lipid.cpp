@@ -380,7 +380,7 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     ClientStack client_stack { get_async(), std::move(tcp_conn), local };
     Mx mx(wakeup);
     auto req_flow
-        { get_requests(mx.wakeup_left(), client_stack.get_requests()) };
+        { get_requests(mx.wakeup(0), client_stack.get_requests()) };
     auto login_req { co_await req_flow };
     if (!authorized(std::move(login_req))) {
         cerr << "client unauthorized" << endl;
@@ -391,13 +391,14 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     ServerStack server_stack
         { get_async(), std::move(irc_conn), config_.irc_server.address };
     auto resp_flow
-        { get_response(mx.wakeup_right(), server_stack.get_responses()) };
+        { get_response(mx.wakeup(1), server_stack.get_responses()) };
     auto login_resp { make_response("login") };
     send(client_stack.get_responses(), login_resp.get());
     for (;;) {
+        enum { REQ, RESP };
         auto result { co_await mx.tie(&req_flow, &resp_flow) };
-        if (result.index() == Mx::LEFT) {
-            auto &request { std::get<Mx::LEFT>(result) };
+        if (result.index() == REQ) {
+            auto &request { std::get<REQ>(result) };
             if (!request) {
                 cerr << "client bailed" << endl;
                 break;
@@ -406,8 +407,8 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                                    request->get(),
                                    server_stack.get_requests());
         } else {
-            assert(result.index() == Mx::RIGHT);
-            auto &response { std::get<Mx::RIGHT>(result) };
+            assert(result.index() == RESP);
+            auto &response { std::get<RESP>(result) };
             if (!response) {
                 cerr << "server bailed" << endl;
                 break;
