@@ -221,39 +221,20 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
     };
     if (!tcp_server)
         throw_errno();
-    /* A negative notification indicates a possibility for
-     * tcp_accept(). A non-negative notification is the key of a
-     * session that has finished. */
     vector<int64_t> notifications;
+    auto connected { false };
     Thunk wakeup_accept {
-        [wakeup, &notifications]() {
-            notifications.push_back(-1);
+        [wakeup, &connected]() {
+            connected = true;
             (*wakeup)();
         }
     };
-    tcp_register_server_callback(tcp_server.get(),
-                                 thunk_to_action(&wakeup_accept));
-    Hold<tcp_server_t> dereg
-        { tcp_server.get(), tcp_unregister_server_callback };
+    auto listener { accept(&wakeup_accept, tcp_server.get()) };
+    listener.await_suspend();
     for (;;) {
-        for (auto key : notifications)
-            if (key >= 0) {
-                auto it { sessions_.find(key) };
-                try {
-                    it->second.get_task()->await_resume();
-                    cerr << "session " << key << " ended" << endl;
-                } catch (const exception &e) {
-                    cerr << "session " << key << " crashed: "
-                         << e.what() << endl;
-                }
-                sessions_.erase(it);
-            }
-        notifications.clear();
-        for (;;) {
-            Hold<tcp_conn_t> tcp_conn
-                { tcp_accept(tcp_server.get(), nullptr, nullptr), tcp_close };
-            if (!tcp_conn)
-                break;
+        co_await suspend;
+        if (connected) {
+            auto tcp_conn { listener.await_resume() };
             auto key { next_session_++ };
             Thunk wakeup_end {
                 [key, wakeup, &notifications]() {
@@ -267,7 +248,37 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
             session.set_task(run_session(session.get_wakeup(),
                                          std::move(tcp_conn),
                                          local));
+            connected = false;
+            listener = accept(&wakeup_accept, tcp_server.get());
+            listener.await_suspend();
         }
+        for (auto key : notifications) {
+            auto it { sessions_.find(key) };
+            try {
+                it->second.get_task()->await_resume();
+                cerr << "session " << key << " ended" << endl;
+            } catch (const exception &e) {
+                cerr << "session " << key << " crashed: "
+                     << e.what() << endl;
+            }
+            sessions_.erase(it);
+        }
+        notifications.clear();
+    }
+}
+
+App::Future<Hold<tcp_conn_t>> App::accept(const Thunk *notify,
+                                          tcp_server_t *tcp_server)
+{
+    auto wakeup
+        { co_await intro<Future<Hold<tcp_conn_t>>::introspect>(notify) };
+    tcp_register_server_callback(tcp_server, thunk_to_action(wakeup));
+    Hold<tcp_server_t> dereg { tcp_server, tcp_unregister_server_callback };
+    for (;;) {
+        Hold<tcp_conn_t> tcp_conn
+            { tcp_accept(tcp_server, nullptr, nullptr), tcp_close };
+        if (tcp_conn)
+            co_return tcp_conn;
         if (errno != EAGAIN)
             throw_errno();
         co_await suspend;
@@ -367,7 +378,7 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     ClientStack client_stack { get_async(), std::move(tcp_conn), local };
     Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx(wakeup);
     auto req_flow
-        { get_request(mx.wakeup_left(), client_stack.get_requests()) };
+        { get_requests(mx.wakeup_left(), client_stack.get_requests()) };
     auto login_req { co_await req_flow };
     if (!authorized(std::move(login_req))) {
         cerr << "client unauthorized" << endl;
@@ -393,6 +404,7 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                                    request->get(),
                                    server_stack.get_requests());
         } else {
+            assert(got_right(result));
             auto response { get_right(result) };
             if (!response) {
                 cerr << "server bailed" << endl;
@@ -467,28 +479,34 @@ App::Future<Hold<tcp_conn_t>> App::connect_to_server(const Thunk *notify)
     }
 }
 
-App::Flow<Hold<json_thing_t>>
-App::get_request(const Thunk *notify, jsonyield_t *requests)
+App::Flow<Hold<json_thing_t>> App::get_requests(const Thunk *notify,
+                                                jsonyield_t *requests)
 {
     auto wakeup
         { co_await intro<Flow<Hold<json_thing_t>>::introspect>(notify) };
+    for (;;) {
+        auto request { co_await get_request(wakeup, requests) };
+        if (!request)
+            break;
+        co_yield std::move(request);
+    }
+}
+
+App::Future<Hold<json_thing_t>> App::get_request(const Thunk *notify,
+                                                 jsonyield_t *requests)
+{
+    auto wakeup
+        { co_await intro<Future<Hold<json_thing_t>>::introspect>(notify) };
     jsonyield_register_callback(requests, thunk_to_action(wakeup));
     Hold<jsonyield_t> dereg { requests, jsonyield_unregister_callback };
     for (;;) {
         Hold<json_thing_t> request
             { jsonyield_receive(requests), json_destroy_thing };
-        if (request)
-            co_yield std::move(request);
-        else
-            switch (errno) {
-                case 0:
-                    co_return;
-                case EAGAIN:
-                    co_await suspend;
-                    break;
-                default:
-                    throw_errno();
-            }
+        if (request || errno == 0)
+            co_return request;
+        if (errno != EAGAIN)
+            throw_errno();
+        co_await suspend;
     }
 }
 
@@ -567,16 +585,13 @@ void App::send(queuestream_t *qstr, json_thing_t *msg)
     queuestream_enqueue(qstr, framer);
 }
 
-App::Flow<string>
-App::get_response(const Thunk *notify, bytestream_1 responses)
+App::Flow<string> App::get_response(const Thunk *notify, bytestream_1 responses)
 {
     auto wakeup { co_await intro<Flow<string>::introspect>(notify) };
-    bytestream_1_register_callback(responses, thunk_to_action(wakeup));
-    Keep<bytestream_1> dereg { responses, bytestream_1_unregister_callback };
     string response;
     for (;;) {
         char buffer[1100];
-        auto count { bytestream_1_read(responses, buffer, sizeof buffer) };
+        auto count { co_await read(wakeup, responses, buffer, sizeof buffer) };
         if (count > 0) {
             response.append(buffer, count);
             for (;;) {
@@ -588,13 +603,27 @@ App::get_response(const Thunk *notify, bytestream_1 responses)
             }
             if (response.length() > 1500)
                 throw OverlongMessageException();
-        } else if (count == 0) {
+        } else {
             if (response.length() > 0)
                 throw ConnectionBrokenException();
             co_return;
-        } else if (errno != EAGAIN)
+        }
+    }
+}
+
+App::Future<size_t> App::read(const Thunk *notify, bytestream_1 stream,
+                              char *buffer, size_t length)
+{
+    auto wakeup { co_await intro<Future<size_t>::introspect>(notify) };
+    bytestream_1_register_callback(stream, thunk_to_action(wakeup));
+    Keep<bytestream_1> dereg { stream, bytestream_1_unregister_callback };
+    for (;;) {
+        auto count { bytestream_1_read(stream, buffer, sizeof buffer) };
+        if (count >= 0)
+            co_return count;
+        if (errno != EAGAIN)
             throw_errno();
-        else co_await suspend;
+        co_await suspend;
     }
 }
 

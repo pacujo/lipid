@@ -152,6 +152,8 @@ private:
                                      const std::string &address);
     Task serve(const pacujo::cordial::Thunk *notify,
                const pacujo::net::SocketAddress &address, const Local &local);
+    Future<pacujo::etc::Hold<tcp_conn_t>>
+    accept(const pacujo::cordial::Thunk *notify, tcp_server_t *tcp_server);
     Task run_session(const pacujo::cordial::Thunk *notify,
                      pacujo::etc::Hold<tcp_conn_t> tcp_conn,
                      const Local &local);
@@ -160,8 +162,9 @@ private:
     Future<pacujo::etc::Hold<tcp_conn_t>>
     connect_to_server(const pacujo::cordial::Thunk *notify);
     Flow<pacujo::etc::Hold<json_thing_t>>
-    get_request(const pacujo::cordial::Thunk *notify,
-                jsonyield_t *requests);
+    get_requests(const pacujo::cordial::Thunk *notify, jsonyield_t *requests);
+    Future<pacujo::etc::Hold<json_thing_t>>
+    get_request(const pacujo::cordial::Thunk *notify, jsonyield_t *requests);
     void process_client_request(queuestream_t *responses,
                                 json_thing_t *request,
                                 queuestream_t *requests);
@@ -173,4 +176,6 @@ private:
     void send(queuestream_t *q, json_thing_t *msg);
     Flow<std::string> get_response(const pacujo::cordial::Thunk *notify,
                                    bytestream_1 responses);
+    Future<size_t> read(const pacujo::cordial::Thunk *notify,
+                        bytestream_1 stream, char *buffer, size_t length);
 };
