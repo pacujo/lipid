@@ -374,13 +374,10 @@ private:
 App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
                            const Local &local)
 {
-    using Mx = Multiplex<Flow<Hold<json_thing_t>>, Flow<string>>;
-
     auto wakeup { co_await intro<Task::introspect>(notify) };
     ClientStack client_stack { get_async(), std::move(tcp_conn), local };
-    Mx mx(wakeup);
-    auto req_flow
-        { get_requests(mx.wakeup(0), client_stack.get_requests()) };
+    Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx { wakeup };
+    auto req_flow { get_requests(mx.wakeup(0), client_stack.get_requests()) };
     auto login_req { co_await req_flow };
     if (!authorized(std::move(login_req))) {
         cerr << "client unauthorized" << endl;
