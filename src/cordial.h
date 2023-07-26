@@ -2,7 +2,9 @@
 
 #include <array>
 #include <coroutine>
+#include <memory>
 #include <optional>
+#include <queue>
 
 namespace pacujo::cordial {
 
@@ -383,8 +385,11 @@ public:
                     return true;
             return false;
         }
-        void await_suspend(std::coroutine_handle<>) {
+        void await_suspend() {
             await_suspend_tpl();
+        }
+        void await_suspend(std::coroutine_handle<>) {
+            await_suspend();
         }
 
         /**
@@ -459,6 +464,90 @@ public:
         await_resume_tpl() {
             assert(false);
         }
+    };
+
+    /**
+     * A RendezVous object is a synchronous messaging channel between
+     * any number of sending and receiving coroutines. Sending is
+     * blocked until receiving takes place and vice versa.
+     */
+    template<typename T>
+    class RendezVous {
+    public:
+
+        /**
+         * The RendezVous constructor takes the framework as an
+         * argument.
+         */
+        RendezVous(Framework *framework) : framework_ { framework } {}
+        RendezVous(const RendezVous &) = delete;
+
+        /**
+         * A receiving `Future` coroutine. Wait until at least one
+         * sending coroutine is offering a value and return it. In
+         * case of contention between multiple receivers, the receiver
+         * that has waited longest gets the value.
+         */
+        Future<T> receive(const Thunk *notify) {
+            auto wakeup {
+                co_await
+                framework_->intro<typename Future<T>::introspect>(notify)
+            };
+            if (status_ == CONGESTED)
+                while (!peers_.empty()) {
+                    auto peer { peers_.front().lock() };
+                    peers_.pop();
+                    if (peer) {
+                        auto value { *peer->value };
+                        (*peer->wakeup)();
+                        co_return value;
+                    }
+                }
+            status_ = STARVED;
+            T value;
+            auto peer { std::make_shared<Peer>(&value, wakeup) };
+            peers_.emplace(peer);
+            co_await std::suspend_always {};
+            co_return std::move(value);
+        }
+
+        /**
+         * A sending `Task` coroutine. Wait until at least one
+         * receiving coroutine is awaiting a value and relay it. In
+         * case of contention between multiple senders, the sender
+         * that has waited longest sends the value.
+         */
+        Task send(const Thunk *notify, T &&value) {
+            auto wakeup
+                { co_await framework_->intro<Task::introspect>(notify) };
+            if (status_ == STARVED)
+                while (!peers_.empty()) {
+                    auto peer { peers_.front().lock() };
+                    peers_.pop();
+                    if (peer) {
+                        *peer->value = std::move(value);
+                        (*peer->wakeup)();
+                        co_return;
+                    }
+                }
+            status_ = CONGESTED;
+            auto peer { std::make_shared<Peer>(&value, wakeup) };
+            peers_.emplace(peer);
+            co_await std::suspend_always {};
+        }
+
+    private:
+        Framework *framework_;
+        struct Peer {
+            T *value;
+            const Thunk *wakeup;
+        };
+
+        // The value of status_ is a don't-care if peers_ is empty.
+        enum { STARVED, CONGESTED } status_ { STARVED };
+
+        // Either all congested senders or all starved receivers.
+        std::queue<std::weak_ptr<Peer>> peers_;
     };
 
     /**
