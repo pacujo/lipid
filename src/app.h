@@ -81,6 +81,93 @@ struct Local {
     std::string private_key;
 };
 
+class ByteStream {
+public:
+    ByteStream(queuestream_t *qstr) :
+        bs_ { queuestream_as_bytestream_1(qstr) } {}
+    ByteStream(jsonencoder_t *encoder) :
+        bs_ { jsonencoder_as_bytestream_1(encoder) } {}
+    ByteStream(naiveencoder_t *encoder) :
+        bs_ { naiveencoder_as_bytestream_1(encoder) } {}
+
+    operator bytestream_1() const { return bs_; }
+    
+private:
+    bytestream_1 bs_;
+};
+
+class ClientStack {
+public:
+    ClientStack(async_t *async, pacujo::etc::Hold<tcp_conn_t> tcp_conn,
+                const Local &local) :
+        tcp_conn_ { std::move(tcp_conn) },
+        tls_conn_ {
+            open_tls_server(async,
+                            tcp_get_input_stream(tcp_conn_.get()),
+                            local.certificate.c_str(),
+                            local.private_key.c_str()),
+            tls_close
+        },
+        responses_ { make_queuestream(async),  queuestream_terminate },
+        requests_ {
+            open_jsonyield(async,
+                           tls_get_plain_input_stream(tls_conn_.get()),
+                           100'000),
+            jsonyield_close
+        }
+    {
+        tls_suppress_ragged_eofs(tls_conn_.get());
+        tls_set_plain_output_stream(tls_conn_.get(),
+                                    ByteStream { responses_.get() });
+        tcp_set_output_stream(tcp_conn_.get(),
+                              tls_get_encrypted_output_stream(tls_conn_.get()));
+    }
+
+    jsonyield_t *get_requests() const { return requests_.get(); }
+    queuestream_t *get_responses() const { return responses_.get(); }
+
+private:
+    pacujo::etc::Hold<tcp_conn_t> tcp_conn_;
+    pacujo::etc::Hold<tls_conn_t> tls_conn_;
+    pacujo::etc::Hold<queuestream_t> responses_;
+    pacujo::etc::Hold<jsonyield_t> requests_;
+};
+
+class ServerStack {
+public:
+    ServerStack(async_t *async, pacujo::etc::Hold<tcp_conn_t> tcp_conn,
+                const std::string &server_hostname) :
+        tcp_conn_ { std::move(tcp_conn) },
+        tls_conn_ {
+            open_tls_client_2(async, 
+                              tcp_get_input_stream(tcp_conn_.get()),
+                              TLS_SYSTEM_CA_BUNDLE,
+                              server_hostname.c_str()),
+            tls_close
+        },
+        requests_ { make_queuestream(async),  queuestream_terminate },
+        responses_ {
+            tls_get_plain_input_stream(tls_conn_.get()),
+            bytestream_1_close
+        }
+    {
+        tls_suppress_ragged_eofs(tls_conn_.get());
+        tls_set_plain_output_stream(tls_conn_.get(),
+                                    ByteStream { requests_.get() });
+        tcp_set_output_stream(tcp_conn_.get(),
+                              tls_get_encrypted_output_stream(tls_conn_.get()));
+    }
+
+    queuestream_t *get_requests() const { return requests_.get(); }
+    bytestream_1 get_responses() const { return responses_.get(); }
+
+private:
+    pacujo::etc::Hold<tcp_conn_t> tcp_conn_;
+    pacujo::etc::Hold<tls_conn_t> tls_conn_;
+    pacujo::etc::Hold<queuestream_t> requests_;
+    pacujo::etc::Keep<bytestream_1> responses_;
+};
+
 struct Client {
     std::string salt;
     // base64(sha256(salt + "\n" + secret + "\n"))
