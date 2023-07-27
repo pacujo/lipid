@@ -210,11 +210,12 @@ public:
     void run(fstrace_t *trace);
 
 private:
-    class Session {
+    class ClientSession {
     public:
-        Session(const pacujo::cordial::Thunk &wakeup) : wakeup_ { wakeup } {}
-        Session(Session &&other) = default;
-        Session &operator=(Session &&other) = default;
+        ClientSession(const pacujo::cordial::Thunk &wakeup) :
+            wakeup_ { wakeup } {}
+        ClientSession(ClientSession &&other) = default;
+        ClientSession &operator=(ClientSession &&other) = default;
         void set_task(Task &&task) { task_ = std::move(task); }
         std::optional<Task> &get_task() { return task_; }
         const pacujo::cordial::Thunk *get_wakeup() const { return &wakeup_; }
@@ -228,7 +229,7 @@ private:
     Config config_;
     std::optional<pacujo::etc::Hold<fsadns_t>> resolver_;
     int64_t next_session_ { 0 };
-    std::map<int64_t, Session> sessions_;
+    std::map<int64_t, ClientSession> client_sessions_;
 
     void read_configuration(std::filesystem::path config_file);
     void add_locals(json_thing_t *locals);

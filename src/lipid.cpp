@@ -242,18 +242,19 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
                     (*wakeup)();
                 }
             };
-            sessions_.emplace(make_pair<int64_t, Session>(std::move(key),
+            client_sessions_.
+                emplace(make_pair<int64_t, ClientSession>(std::move(key),
                                                           { wakeup_end }));
-            auto &[_, session] = *sessions_.find(key);
-            session.set_task(run_session(session.get_wakeup(),
-                                         std::move(tcp_conn),
-                                         local_config));
+            auto &[_, client_session] = *client_sessions_.find(key);
+            client_session.set_task(run_session(client_session.get_wakeup(),
+                                                std::move(tcp_conn),
+                                                local_config));
             connected = false;
             listener = accept(&wakeup_accept, tcp_server.get());
             listener.await_suspend();
         }
         for (auto key : notifications) {
-            auto it { sessions_.find(key) };
+            auto it { client_sessions_.find(key) };
             try {
                 it->second.get_task()->await_resume();
                 cerr << "session " << key << " ended" << endl;
@@ -261,7 +262,7 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
                 cerr << "session " << key << " crashed: "
                      << e.what() << endl;
             }
-            sessions_.erase(it);
+            client_sessions_.erase(it);
         }
         notifications.clear();
     }
