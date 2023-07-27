@@ -72,7 +72,7 @@ struct UserSettings {
     std::map<std::string, std::string> autojoins;
 };
 
-struct Local {
+struct LocalConfig {
     std::string address { "0.0.0.0" };
     std::vector<pacujo::net::SocketAddress> resolutions;
     int port { 11345 };
@@ -99,13 +99,13 @@ private:
 class ClientStack {
 public:
     ClientStack(async_t *async, pacujo::etc::Hold<tcp_conn_t> tcp_conn,
-                const Local &local) :
+                const LocalConfig &local_config) :
         tcp_conn_ { std::move(tcp_conn) },
         tls_conn_ {
             open_tls_server(async,
                             tcp_get_input_stream(tcp_conn_.get()),
-                            local.certificate.c_str(),
-                            local.private_key.c_str()),
+                            local_config.certificate.c_str(),
+                            local_config.private_key.c_str()),
             tls_close
         },
         responses_ { make_queuestream(async),  queuestream_terminate },
@@ -168,7 +168,7 @@ private:
     pacujo::etc::Keep<bytestream_1> responses_;
 };
 
-struct Client {
+struct ClientConfig {
     std::string salt;
     // base64(sha256(salt + "\n" + secret + "\n"))
     std::string sha256;
@@ -176,8 +176,8 @@ struct Client {
 
 struct Config {
     std::map<std::string, UserSettings> settings;
-    std::vector<Local> local;
-    std::map<std::string, Client> clients;
+    std::vector<LocalConfig> local;
+    std::map<std::string, ClientConfig> clients;
     struct {
         std::string address { "irc.oftc.net" };
         int port { 6697 };
@@ -238,12 +238,13 @@ private:
     Future<AddrInfo> resolve_address(const pacujo::cordial::Thunk *notify,
                                      const std::string &address);
     Task serve(const pacujo::cordial::Thunk *notify,
-               const pacujo::net::SocketAddress &address, const Local &local);
+               const pacujo::net::SocketAddress &address,
+               const LocalConfig &local_config);
     Future<pacujo::etc::Hold<tcp_conn_t>>
     accept(const pacujo::cordial::Thunk *notify, tcp_server_t *tcp_server);
     Task run_session(const pacujo::cordial::Thunk *notify,
                      pacujo::etc::Hold<tcp_conn_t> tcp_conn,
-                     const Local &local);
+                     const LocalConfig &local_config);
     bool authorized(std::optional<pacujo::etc::Hold<json_thing_t>> login_req);
     void authorize(std::optional<pacujo::etc::Hold<json_thing_t>> login_req);
     Future<pacujo::etc::Hold<tcp_conn_t>>

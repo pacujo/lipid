@@ -96,23 +96,23 @@ void App::add_locals(json_thing_t *locals)
         auto value = json_element_value(e);
         if (json_thing_type(value) != JSON_OBJECT)
             throw BadConfigException();
-        Local local;
+        LocalConfig local_config;
         const char *address;
         if (json_object_get_string(value, "address", &address))
-            local.address = address;
+            local_config.address = address;
         long long port;
         if (json_object_get_integer(value, "port", &port))
-            local.port = port;
+            local_config.port = port;
         const char *name;
         if (json_object_get_string(value, "tls-server-name", &name))
-            local.tls_server_name = name;
+            local_config.tls_server_name = name;
         const char *certificate;
         if (json_object_get_string(value, "certificate", &certificate))
-            local.certificate = certificate;
+            local_config.certificate = certificate;
         const char *private_key;
         if (json_object_get_string(value, "private-key", &private_key))
-            local.private_key = private_key;
-        config_.local.push_back(local);
+            local_config.private_key = private_key;
+        config_.local.push_back(local_config);
     }
 }
 
@@ -124,14 +124,14 @@ void App::add_clients(json_thing_t *clients)
         auto value { json_field_value(field) };
         if (json_thing_type(value) != JSON_OBJECT)
             throw BadConfigException();
-        Client client;
+        ClientConfig client_config;
         const char *salt;
         if (json_object_get_string(value, "salt", &salt))
-            client.salt = salt;
+            client_config.salt = salt;
         const char *sha256;
         if (json_object_get_string(value, "sha256", &sha256))
-            client.sha256 = sha256;
-        config_.clients[name] = client;
+            client_config.sha256 = sha256;
+        config_.clients[name] = client_config;
     }
 }
 
@@ -210,7 +210,7 @@ App::Future<AddrInfo> App::resolve_address(const Thunk *notify,
 }
 
 App::Task App::serve(const Thunk *notify, const SocketAddress &address,
-                     const Local &local)
+                     const LocalConfig &local_config)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
     Hold<tcp_server_t> tcp_server {
@@ -247,7 +247,7 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
             auto &[_, session] = *sessions_.find(key);
             session.set_task(run_session(session.get_wakeup(),
                                          std::move(tcp_conn),
-                                         local));
+                                         local_config));
             connected = false;
             listener = accept(&wakeup_accept, tcp_server.get());
             listener.await_suspend();
@@ -286,10 +286,10 @@ App::Future<Hold<tcp_conn_t>> App::accept(const Thunk *notify,
 }
 
 App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
-                           const Local &local)
+                           const LocalConfig &local_config)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
-    ClientStack client_stack { get_async(), std::move(tcp_conn), local };
+    ClientStack client_stack { get_async(), std::move(tcp_conn), local_config };
     Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx { wakeup };
     auto req_flow { get_requests(mx.wakeup(0), client_stack.get_requests()) };
     auto login_req { co_await req_flow };
