@@ -199,7 +199,33 @@ public:
         std::coroutine_handle<Promise> handle_ {};
     };
 
-    class Task;
+    template<typename Base, typename Promise>
+    class TaskCommon : public Base {
+        friend Promise;
+    public:
+        using promise_type = Promise;
+        using introspect = Introspect<promise_type>;
+
+        TaskCommon(TaskCommon &&other) : Base { std::move(other) } {}
+        TaskCommon &operator=(TaskCommon &&other) {
+            Base::operator=(std::move(other));
+            return *this;
+        }
+
+    private:
+        using Base::BaseTask;
+    };
+
+    struct TaskPromise;
+
+    using TaskBase = BaseTask<TaskPromise, Nothing>;
+
+    /**
+     * A coroutine returning `Task` performs an operation and
+     * (possibly) completes without a return value. The technical
+     * return type `Nothing` is equivalent with `void`.
+     */
+    using Task = TaskCommon<TaskBase, TaskPromise>;
 
     struct TaskPromise : BasePromise<Nothing> {
         Task get_return_object() { return Task { get_handle() }; }
@@ -209,32 +235,17 @@ public:
         }
     };
 
-    using TaskBase = BaseTask<TaskPromise, Nothing>;
-
-    /**
-     * A coroutine returning `Task` performs an operation and
-     * (possibly) completes without a return value. The technical
-     * return type `Nothing` is equivalent with `void`.
-     */
-    class Task : public TaskBase {
-        friend TaskPromise;
-    public:
-        using promise_type = TaskPromise;
-        using introspect = Introspect<promise_type>;
-
-        Task(Task &&other) : TaskBase { std::move(other) } {}
-        Task &operator=(Task &&other) {
-            TaskBase::operator=(std::move(other));
-            return *this;
-        }
-
-    private:
-        using TaskBase::BaseTask;
-    };
-
+    template<typename Result> struct FuturePromise;
 
     template<typename Result>
-    class Future;
+    using FutureBase = BaseTask<FuturePromise<Result>, Result>;
+
+    /**
+     * A coroutine returning `Future` produces a single result via
+     * `co_return EXPR`.
+     */
+    template<typename Result>
+    using Future = TaskCommon<FutureBase<Result>, FuturePromise<Result>>;
 
     template<typename Result>
     struct FuturePromise : BasePromise<Result> {
@@ -250,32 +261,21 @@ public:
         }
     };
 
+    template<typename Result> struct FlowPromise;
+
     template<typename Result>
-    using FutureBase = BaseTask<FuturePromise<Result>, Result>;
+    using FlowBase = BaseTask<FlowPromise<Result>, std::optional<Result>>;
 
     /**
-     * A coroutine returning `Future` produces a single result via
-     * `co_return EXPR`.
+     * A coroutine returning `Flow` produces a number results with
+     * `co_yield` and (optionally) finishes.
+     *
+     * The caller receives the results wrapped in `std::optional`.
+     * When the flow finishes, `nullopt` is produced. The flow should
+     * not be awaited again afterward.
      */
     template<typename Result>
-    class Future : public FutureBase<Result> {
-        friend FuturePromise<Result>;
-    public:
-        using promise_type = FuturePromise<Result>;
-        using introspect = Introspect<promise_type>;
-
-        Future(Future &&other) : FutureBase<Result> { std::move(other) } {}
-        Future &operator=(Future &&other) {
-            FutureBase<Result>::operator=(std::move(other));
-            return *this;
-        }
-
-    private:
-        using FutureBase<Result>::BaseTask;
-    };
-
-    template<typename Result>
-    class Flow;
+    using Flow = TaskCommon<FlowBase<Result>, FlowPromise<Result>>;
 
     template<typename Result>
     struct FlowPromise : BasePromise<std::optional<Result>> {
@@ -291,34 +291,6 @@ public:
         std::coroutine_handle<FlowPromise> get_handle() {
             return std::coroutine_handle<FlowPromise>::from_promise(*this);
         }
-    };
-
-    template<typename Result>
-    using FlowBase = BaseTask<FlowPromise<Result>, std::optional<Result>>;
-
-    /**
-     * A coroutine returning `Flow` produces a number results with
-     * `co_yield` and (optionally) finishes.
-     *
-     * The caller receives the results wrapped in `std::optional`.
-     * When the flow finishes, `nullopt` is produced. The flow should
-     * not be awaited again afterward.
-     */
-    template<typename Result>
-    class Flow : public FlowBase<Result> {
-        friend FlowPromise<Result>;
-    public:
-        using promise_type = FlowPromise<Result>;
-        using introspect = Introspect<promise_type>;
-
-        Flow(Flow &&other) : FlowBase<Result> { std::move(other) } {}
-        Flow &operator=(Flow &&other) {
-            FlowBase<Result>::operator=(std::move(other));
-            return *this;
-        }
-
-    private:
-        using FlowBase<Result>::BaseTask;
     };
 
     /**
