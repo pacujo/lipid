@@ -133,10 +133,11 @@ public:
                         framework->dispose(this);
                 }
             },
+            executor_ { framework->executor(&electric_wakeup_) },
             lazy_wakeup_ {
-                [this, framework]() {
+                [this]() {
                     take();
-                    framework->executor(&electric_wakeup_)();
+                    executor_();
                 }
             }
         {}
@@ -144,6 +145,7 @@ public:
         
     private:
         Thunk electric_wakeup_;
+        Thunk executor_;
         Thunk lazy_wakeup_;
     };
 
