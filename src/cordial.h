@@ -199,33 +199,32 @@ public:
         std::coroutine_handle<Promise> handle_ {};
     };
 
-    template<typename Base, typename Promise>
-    class TaskCommon : public Base {
+    template<typename Promise, typename Output>
+    class TaskCommon : public BaseTask<Promise, Output> {
         friend Promise;
     public:
         using promise_type = Promise;
         using introspect = Introspect<promise_type>;
 
-        TaskCommon(TaskCommon &&other) : Base { std::move(other) } {}
+        TaskCommon(TaskCommon &&other) :
+            BaseTask<Promise, Output> { std::move(other) } {}
         TaskCommon &operator=(TaskCommon &&other) {
-            Base::operator=(std::move(other));
+            BaseTask<Promise, Output>::operator=(std::move(other));
             return *this;
         }
 
     private:
-        using Base::BaseTask;
+        using BaseTask<Promise, Output>::BaseTask;
     };
 
     struct TaskPromise;
-
-    using TaskBase = BaseTask<TaskPromise, Nothing>;
 
     /**
      * A coroutine returning `Task` performs an operation and
      * (possibly) completes without a return value. The technical
      * return type `Nothing` is equivalent with `void`.
      */
-    using Task = TaskCommon<TaskBase, TaskPromise>;
+    using Task = TaskCommon<TaskPromise, Nothing>;
 
     struct TaskPromise : BasePromise<Nothing> {
         Task get_return_object() { return Task { get_handle() }; }
@@ -237,15 +236,12 @@ public:
 
     template<typename Result> struct FuturePromise;
 
-    template<typename Result>
-    using FutureBase = BaseTask<FuturePromise<Result>, Result>;
-
     /**
      * A coroutine returning `Future` produces a single result via
      * `co_return EXPR`.
      */
     template<typename Result>
-    using Future = TaskCommon<FutureBase<Result>, FuturePromise<Result>>;
+    using Future = TaskCommon<FuturePromise<Result>, Result>;
 
     template<typename Result>
     struct FuturePromise : BasePromise<Result> {
@@ -263,9 +259,6 @@ public:
 
     template<typename Result> struct FlowPromise;
 
-    template<typename Result>
-    using FlowBase = BaseTask<FlowPromise<Result>, std::optional<Result>>;
-
     /**
      * A coroutine returning `Flow` produces a number results with
      * `co_yield` and (optionally) finishes.
@@ -275,7 +268,7 @@ public:
      * not be awaited again afterward.
      */
     template<typename Result>
-    using Flow = TaskCommon<FlowBase<Result>, FlowPromise<Result>>;
+    using Flow = TaskCommon<FlowPromise<Result>, std::optional<Result>>;
 
     template<typename Result>
     struct FlowPromise : BasePromise<std::optional<Result>> {
