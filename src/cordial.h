@@ -46,6 +46,10 @@ class Framework {
 public:
     virtual ~Framework() {}
 
+    struct Disposable {
+        virtual ~Disposable() {}
+    };
+
     /**
      * A reference-counting structure to support callbacks from the
      * "background" after a coroutine has been deallocated.
@@ -55,9 +59,8 @@ public:
      * can be passed on to the concrete (C?) framework for deletion in
      * the background.
      */
-    class Disposable {
+    class RefCounted : public Disposable {
     public:
-        virtual ~Disposable() {}
         void take() { use_count_++; }
         bool release() { return --use_count_ == 0; }
         bool disown() {
@@ -85,7 +88,7 @@ public:
         void unhandled_exception() {
             exception_ = std::current_exception();
         }
-        void arm(const Thunk *notify, Disposable *companion) {
+        void arm(const Thunk *notify, RefCounted *companion) {
             notify_ = notify;
             companion_ = companion;
         }
@@ -111,7 +114,7 @@ public:
     private:
         std::exception_ptr exception_;
         const Thunk *notify_;
-        Disposable *companion_;
+        RefCounted *companion_;
     };
 
     /**
@@ -119,7 +122,7 @@ public:
      * deallocated but callbacks are still pending.
      */
     template<typename PromiseType>
-    class Companion : public Disposable {
+    class Companion : public RefCounted {
     public:
         Companion(PromiseType *promise, Framework *framework) :
             electric_wakeup_ {
