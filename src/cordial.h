@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cassert>
 #include <coroutine>
 #include <memory>
 #include <optional>
@@ -77,6 +76,7 @@ public:
      */
     class BasePromiseType {
     public:
+        std::suspend_always initial_suspend() { return {}; }
         std::suspend_always final_suspend() noexcept {
             notify();
             return {};
@@ -88,13 +88,7 @@ public:
             notify_ = notify;
             companion_ = companion;
         }
-        void begin_await() {
-            assert(!being_awaited_); // catch await protocol violations
-            being_awaited_ = true;
-        }
-        void end_await() {
-            assert(being_awaited_); // catch await protocol violations
-            being_awaited_ = false;
+        void check_exception() {
             if (exception_)
                 std::rethrow_exception(exception_);
         }
@@ -183,7 +177,6 @@ public:
     public:
         struct promise_type : public BasePromiseType {
             Task get_return_object() { return Task { get_handle() }; }
-            std::suspend_never initial_suspend() { return {}; }
             void return_void() {}
             std::coroutine_handle<promise_type> get_handle() {
                 return std::coroutine_handle<promise_type>::from_promise(*this);
@@ -193,10 +186,10 @@ public:
         using introspect = Introspect<promise_type>;
 
         bool await_ready() { return false; }
-        void await_suspend() { handle_.promise().begin_await(); }
+        void await_suspend() { handle_.resume(); }
         void await_suspend(std::coroutine_handle<>) { await_suspend(); }
         Nothing await_resume() {
-            handle_.promise().end_await();
+            handle_.promise().check_exception();
             return {};
         }
         Task(Task &&other) : handle_ { other.handle_ } {
@@ -223,7 +216,6 @@ public:
     public:
         struct promise_type : public BasePromiseType {
             Future get_return_object() { return Future { get_handle() }; }
-            std::suspend_never initial_suspend() { return {}; }
             std::suspend_always return_value(Result &&value) {
                 result = std::forward<Result>(value);
                 return {};
@@ -232,7 +224,7 @@ public:
                 return std::coroutine_handle<promise_type>::from_promise(*this);
             }
             Result get_result() {
-                end_await();
+                check_exception();
                 return std::move(result);
             }
 
@@ -242,7 +234,7 @@ public:
         using introspect = Introspect<promise_type>;
 
         bool await_ready() { return false; }
-        void await_suspend() { handle_.promise().begin_await(); }
+        void await_suspend() { handle_.resume(); }
         void await_suspend(std::coroutine_handle<>) { await_suspend(); }
         Result await_resume() { return handle_.promise().get_result(); }
         Future(Future &&other) : handle_ { other.handle_ } {
@@ -274,7 +266,6 @@ public:
     public:
         struct promise_type : public BasePromiseType {
             Flow get_return_object() { return Flow { get_handle() }; }
-            std::suspend_always initial_suspend() { return {}; }
             std::suspend_always yield_value(Result &&value) {
                 result = std::forward<Result>(value);
                 notify();
@@ -286,7 +277,7 @@ public:
             }
 
             std::optional<Result> get_result() {
-                end_await();
+                check_exception();
                 return std::move(result);
             }
 
@@ -296,10 +287,7 @@ public:
         using introspect = Introspect<promise_type>;
 
         bool await_ready() { return false; }
-        void await_suspend() {
-            handle_.promise().begin_await();
-            handle_.resume();
-        }
+        void await_suspend() { handle_.resume(); }
         void await_suspend(std::coroutine_handle<>) { await_suspend(); }
         std::optional<Result> await_resume() {
             return handle_.promise().get_result();
@@ -394,12 +382,8 @@ public:
                     return true;
             return false;
         }
-        void await_suspend() {
-            await_suspend_tpl();
-        }
-        void await_suspend(std::coroutine_handle<>) {
-            await_suspend();
-        }
+        void await_suspend() { await_suspend_tpl(); }
+        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
 
         /**
          * The coroutine results are returned one at a time using this
@@ -414,9 +398,7 @@ public:
         using Result = std::variant<
             decltype(reinterpret_cast<Coros *>(0)->await_resume())...>;
 
-        Result await_resume() {
-            return await_resume_tpl();
-        }
+        Result await_resume() { return await_resume_tpl(); }
 
     private:
 

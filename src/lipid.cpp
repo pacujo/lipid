@@ -57,6 +57,7 @@ void App::run(fstrace_t *trace)
         fsadns_destroy_resolver
     };
     auto server { run_server() };
+    server.await_suspend();
     if (async_loop(get_async()) < 0)
         throw_errno();
 }
@@ -151,8 +152,11 @@ App::Task App::run_server()
     co_await resolve_addresses(wakeup);
     vector<Task> holder;
     for (auto &local : config_.local)
-        for (auto &res : local.resolutions)
-            holder.push_back(serve(wakeup, res, local));
+        for (auto &res : local.resolutions) {
+            auto service { serve(wakeup, res, local) };
+            service.await_suspend();
+            holder.push_back(std::move(service));
+        }
     for (auto &_ : holder)
         co_await suspend;       // TODO: call await_resume()
 }
@@ -161,8 +165,11 @@ App::Task App::resolve_addresses(const Thunk *notify)
 {
     auto wakeup { co_await intro<Task::introspect>(notify) };
     vector<Future<AddrInfo>> resolve_local;
-    for (auto &local : config_.local)
-        resolve_local.emplace_back(resolve_address(wakeup, local.address));
+    for (auto &local : config_.local) {
+        auto local_fut { resolve_address(wakeup, local.address) };
+        local_fut.await_suspend();
+        resolve_local.emplace_back(std::move(local_fut));
+    }
     for (auto &_ : resolve_local)
         co_await suspend;
     auto it { config_.local.begin() };
