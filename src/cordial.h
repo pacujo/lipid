@@ -72,9 +72,10 @@ public:
     };
 
     /**
-     * Commonalities between `Task`, `Future` and `Flow` coroutines.
+     * Commonalities between `TaskPromise`, `FuturePromise` and `FlowPromise`.
      */
-    class BasePromiseType {
+    template<typename Result>
+    class BasePromise {
     public:
         std::suspend_always initial_suspend() { return {}; }
         std::suspend_always final_suspend() noexcept {
@@ -88,21 +89,24 @@ public:
             notify_ = notify;
             companion_ = companion;
         }
-        void check_exception() {
+        Result get_result() {
             if (exception_)
                 std::rethrow_exception(exception_);
+            return std::move(result_);
         }
 
     protected:
-        ~BasePromiseType() {
+        ~BasePromise() {
             if (companion_->disown()) {
                 // No need to go through framework->dispose(). Thus,
-                // BasePromiseType doesn't even need to carry a
-                // framework reference around.
+                // BasePromise doesn't even need to carry a framework
+                // reference around.
                 delete companion_;
             }
         }
         void notify() { (*notify_)(); }
+
+        Result result_ {};
 
     private:
         std::exception_ptr exception_;
@@ -169,89 +173,128 @@ public:
     };
 
     /**
-     * A coroutine returning `Task` performs an operation and
-     * (possibly) completes without a return value. The technical
-     * return type `Nothing` is equivalent with `void`.
+     * Commonalities between `Task`, `Future` and `Flow`.
      */
-    class Task {
+    template<typename Promise, typename Result>
+    class BaseTask {
     public:
-        struct promise_type : public BasePromiseType {
-            Task get_return_object() { return Task { get_handle() }; }
-            void return_void() {}
-            std::coroutine_handle<promise_type> get_handle() {
-                return std::coroutine_handle<promise_type>::from_promise(*this);
-            }
-        };
-
-        using introspect = Introspect<promise_type>;
-
         bool await_ready() { return false; }
         void await_suspend() { handle_.resume(); }
         void await_suspend(std::coroutine_handle<>) { await_suspend(); }
-        Nothing await_resume() {
-            handle_.promise().check_exception();
-            return {};
-        }
-        Task(Task &&other) : handle_ { other.handle_ } {
+        Result await_resume() { return handle_.promise().get_result(); }
+
+    protected:
+        BaseTask(std::coroutine_handle<Promise> handle) : handle_ { handle } {}
+        BaseTask(BaseTask &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
         }
-        Task &operator=(Task &&other) {
+        BaseTask &operator=(BaseTask &&other) {
             handle_ = other.handle_;
             other.handle_ = nullptr;
             return *this;
         }
-        ~Task() { if (handle_) handle_.destroy(); }
+        ~BaseTask() { if (handle_) handle_.destroy(); }
 
     private:
-        Task(std::coroutine_handle<promise_type> handle) : handle_ { handle } {}
-        std::coroutine_handle<promise_type> handle_ {};
+        std::coroutine_handle<Promise> handle_ {};
     };
+
+    class Task;
+
+    struct TaskPromise : BasePromise<Nothing> {
+        Task get_return_object() { return Task { get_handle() }; }
+        void return_void() {}
+        std::coroutine_handle<TaskPromise> get_handle() {
+            return std::coroutine_handle<TaskPromise>::from_promise(*this);
+        }
+    };
+
+    using TaskBase = BaseTask<TaskPromise, Nothing>;
+
+    /**
+     * A coroutine returning `Task` performs an operation and
+     * (possibly) completes without a return value. The technical
+     * return type `Nothing` is equivalent with `void`.
+     */
+    class Task : public TaskBase {
+        friend TaskPromise;
+    public:
+        using promise_type = TaskPromise;
+        using introspect = Introspect<promise_type>;
+
+        Task(Task &&other) : TaskBase { std::move(other) } {}
+        Task &operator=(Task &&other) {
+            TaskBase::operator=(std::move(other));
+            return *this;
+        }
+
+    private:
+        using TaskBase::BaseTask;
+    };
+
+
+    template<typename Result>
+    class Future;
+
+    template<typename Result>
+    struct FuturePromise : BasePromise<Result> {
+        Future<Result> get_return_object() {
+            return Future<Result> { get_handle() };
+        }
+        std::suspend_always return_value(Result &&value) {
+            this->result_ = std::forward<Result>(value);
+            return {};
+        }
+        std::coroutine_handle<FuturePromise> get_handle() {
+            return std::coroutine_handle<FuturePromise>::from_promise(*this);
+        }
+    };
+
+    template<typename Result>
+    using FutureBase = BaseTask<FuturePromise<Result>, Result>;
 
     /**
      * A coroutine returning `Future` produces a single result via
      * `co_return EXPR`.
      */
     template<typename Result>
-    class Future {
+    class Future : public FutureBase<Result> {
+        friend FuturePromise<Result>;
     public:
-        struct promise_type : public BasePromiseType {
-            Future get_return_object() { return Future { get_handle() }; }
-            std::suspend_always return_value(Result &&value) {
-                result = std::forward<Result>(value);
-                return {};
-            }
-            std::coroutine_handle<promise_type> get_handle() {
-                return std::coroutine_handle<promise_type>::from_promise(*this);
-            }
-            Result get_result() {
-                check_exception();
-                return std::move(result);
-            }
-
-            Result result {};
-        };
-
+        using promise_type = FuturePromise<Result>;
         using introspect = Introspect<promise_type>;
 
-        bool await_ready() { return false; }
-        void await_suspend() { handle_.resume(); }
-        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
-        Result await_resume() { return handle_.promise().get_result(); }
-        Future(Future &&other) : handle_ { other.handle_ } {
-            other.handle_ = nullptr;
-        }
+        Future(Future &&other) : FutureBase<Result> { std::move(other) } {}
         Future &operator=(Future &&other) {
-            handle_ = other.handle_;
-            other.handle_ = nullptr;
+            FutureBase<Result>::operator=(std::move(other));
             return *this;
         }
-        ~Future() { if (handle_) handle_.destroy(); }
 
     private:
-        Future(std::coroutine_handle<promise_type> handle) :
-            handle_ { handle } {}
-        std::coroutine_handle<promise_type> handle_ {};
+        using FutureBase<Result>::BaseTask;
     };
+
+    template<typename Result>
+    class Flow;
+
+    template<typename Result>
+    struct FlowPromise : BasePromise<std::optional<Result>> {
+        Flow<Result> get_return_object() {
+            return Flow<Result> { get_handle() };
+        }
+        std::suspend_always yield_value(Result &&value) {
+            this->result_ = std::forward<Result>(value);
+            this->notify();
+            return {};
+        }
+        void return_void() { this->result_ = {}; }
+        std::coroutine_handle<FlowPromise> get_handle() {
+            return std::coroutine_handle<FlowPromise>::from_promise(*this);
+        }
+    };
+
+    template<typename Result>
+    using FlowBase = BaseTask<FlowPromise<Result>, std::optional<Result>>;
 
     /**
      * A coroutine returning `Flow` produces a number results with
@@ -262,49 +305,20 @@ public:
      * not be awaited again afterward.
      */
     template<typename Result>
-    class Flow {
+    class Flow : public FlowBase<Result> {
+        friend FlowPromise<Result>;
     public:
-        struct promise_type : public BasePromiseType {
-            Flow get_return_object() { return Flow { get_handle() }; }
-            std::suspend_always yield_value(Result &&value) {
-                result = std::forward<Result>(value);
-                notify();
-                return {};
-            }
-            void return_void() { result = std::nullopt; }
-            std::coroutine_handle<promise_type> get_handle() {
-                return std::coroutine_handle<promise_type>::from_promise(*this);
-            }
-
-            std::optional<Result> get_result() {
-                check_exception();
-                return std::move(result);
-            }
-
-            std::optional<Result> result {};
-        };
-
+        using promise_type = FlowPromise<Result>;
         using introspect = Introspect<promise_type>;
 
-        bool await_ready() { return false; }
-        void await_suspend() { handle_.resume(); }
-        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
-        std::optional<Result> await_resume() {
-            return handle_.promise().get_result();
-        }
-        Flow(Flow &&other) : handle_ { other.handle_ } {
-            other.handle_ = nullptr;
-        }
+        Flow(Flow &&other) : FlowBase<Result> { std::move(other) } {}
         Flow &operator=(Flow &&other) {
-            handle_ = other.handle_;
-            other.handle_ = nullptr;
+            FlowBase<Result>::operator=(std::move(other));
             return *this;
         }
-        ~Flow() { if (handle_) handle_.destroy(); }
 
     private:
-        Flow(std::coroutine_handle<promise_type> handle) : handle_ { handle } {}
-        std::coroutine_handle<promise_type> handle_ {};
+        using FlowBase<Result>::BaseTask;
     };
 
     /**
