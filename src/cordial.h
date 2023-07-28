@@ -175,15 +175,13 @@ public:
     /**
      * Commonalities between `Task`, `Future` and `Flow`.
      */
-    template<typename Promise, typename Result>
+    template<typename Promise, typename Output>
     class BaseTask {
+        friend Promise;
     public:
-        bool await_ready() { return false; }
-        void await_suspend() { handle_.resume(); }
-        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
-        Result await_resume() { return handle_.promise().get_result(); }
+        using promise_type = Promise;
+        using introspect = Introspect<promise_type>;
 
-    protected:
         BaseTask(std::coroutine_handle<Promise> handle) : handle_ { handle } {}
         BaseTask(BaseTask &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
@@ -194,27 +192,13 @@ public:
             return *this;
         }
         ~BaseTask() { if (handle_) handle_.destroy(); }
+        bool await_ready() { return false; }
+        void await_suspend() { handle_.resume(); }
+        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
+        Output await_resume() { return handle_.promise().get_result(); }
 
     private:
         std::coroutine_handle<Promise> handle_ {};
-    };
-
-    template<typename Promise, typename Output>
-    class TaskCommon : public BaseTask<Promise, Output> {
-        friend Promise;
-    public:
-        using promise_type = Promise;
-        using introspect = Introspect<promise_type>;
-
-        TaskCommon(TaskCommon &&other) :
-            BaseTask<Promise, Output> { std::move(other) } {}
-        TaskCommon &operator=(TaskCommon &&other) {
-            BaseTask<Promise, Output>::operator=(std::move(other));
-            return *this;
-        }
-
-    private:
-        using BaseTask<Promise, Output>::BaseTask;
     };
 
     struct TaskPromise;
@@ -224,7 +208,7 @@ public:
      * (possibly) completes without a return value. The technical
      * return type `Nothing` is equivalent with `void`.
      */
-    using Task = TaskCommon<TaskPromise, Nothing>;
+    using Task = BaseTask<TaskPromise, Nothing>;
 
     struct TaskPromise : BasePromise<Nothing> {
         Task get_return_object() { return Task { get_handle() }; }
@@ -241,7 +225,7 @@ public:
      * `co_return EXPR`.
      */
     template<typename Result>
-    using Future = TaskCommon<FuturePromise<Result>, Result>;
+    using Future = BaseTask<FuturePromise<Result>, Result>;
 
     template<typename Result>
     struct FuturePromise : BasePromise<Result> {
@@ -268,7 +252,7 @@ public:
      * not be awaited again afterward.
      */
     template<typename Result>
-    using Flow = TaskCommon<FlowPromise<Result>, std::optional<Result>>;
+    using Flow = BaseTask<FlowPromise<Result>, std::optional<Result>>;
 
     template<typename Result>
     struct FlowPromise : BasePromise<std::optional<Result>> {
