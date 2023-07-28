@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <coroutine>
 #include <memory>
 #include <optional>
@@ -87,7 +88,13 @@ public:
             notify_ = notify;
             companion_ = companion;
         }
-        void check_exception() {
+        void begin_await() {
+            assert(!being_awaited_); // catch await protocol violations
+            being_awaited_ = true;
+        }
+        void end_await() {
+            assert(being_awaited_); // catch await protocol violations
+            being_awaited_ = false;
             if (exception_)
                 std::rethrow_exception(exception_);
         }
@@ -107,6 +114,7 @@ public:
         std::exception_ptr exception_;
         const Thunk *notify_;
         Disposable *companion_;
+        bool being_awaited_;
     };
 
     /**
@@ -185,10 +193,10 @@ public:
         using introspect = Introspect<promise_type>;
 
         bool await_ready() { return false; }
-        void await_suspend() {}
-        void await_suspend(std::coroutine_handle<>) {}
+        void await_suspend() { handle_.promise().begin_await(); }
+        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
         Nothing await_resume() {
-            handle_.promise().check_exception();
+            handle_.promise().end_await();
             return {};
         }
         Task(Task &&other) : handle_ { other.handle_ } {
@@ -224,7 +232,7 @@ public:
                 return std::coroutine_handle<promise_type>::from_promise(*this);
             }
             Result get_result() {
-                check_exception();
+                end_await();
                 return std::move(result);
             }
 
@@ -234,8 +242,8 @@ public:
         using introspect = Introspect<promise_type>;
 
         bool await_ready() { return false; }
-        void await_suspend() {}
-        void await_suspend(std::coroutine_handle<>) {}
+        void await_suspend() { handle_.promise().begin_await(); }
+        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
         Result await_resume() { return handle_.promise().get_result(); }
         Future(Future &&other) : handle_ { other.handle_ } {
             other.handle_ = nullptr;
@@ -278,7 +286,7 @@ public:
             }
 
             std::optional<Result> get_result() {
-                check_exception();
+                end_await();
                 return std::move(result);
             }
 
@@ -288,10 +296,11 @@ public:
         using introspect = Introspect<promise_type>;
 
         bool await_ready() { return false; }
-        void await_suspend() { handle_.resume(); }
-        void await_suspend(std::coroutine_handle<> h) {
-            await_suspend();
+        void await_suspend() {
+            handle_.promise().begin_await();
+            handle_.resume();
         }
+        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
         std::optional<Result> await_resume() {
             return handle_.promise().get_result();
         }

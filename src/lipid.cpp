@@ -244,9 +244,12 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
             };
             auto client_session { std::make_shared<ClientSession>(wakeup_end) };
             client_sessions_.insert(make_pair(key, client_session));
-            client_session->set_task(run_session(client_session->get_wakeup(),
-                                                 std::move(tcp_conn),
-                                                 local_config));
+            auto client_task {
+                run_session(client_session->get_wakeup(), std::move(tcp_conn),
+                            local_config)
+            };
+            client_task.await_suspend();
+            client_session->set_task(std::move(client_task));
             connected = false;
             listener = accept(&wakeup_accept, tcp_server.get());
             listener.await_suspend();
