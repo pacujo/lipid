@@ -158,7 +158,10 @@ App::Task App::run_server()
             holder.push_back(std::move(service));
         }
     for (auto &_ : holder)
-        co_await suspend;       // TODO: call await_resume()
+        co_await suspend;
+    for (auto &service : holder)
+        service.await_resume();
+    async_quit_loop(get_async());
 }
 
 App::Task App::resolve_addresses(const Thunk *notify)
