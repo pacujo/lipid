@@ -112,7 +112,6 @@ public:
         std::exception_ptr exception_;
         const Thunk *notify_;
         Disposable *companion_;
-        bool being_awaited_;
     };
 
     /**
