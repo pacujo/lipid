@@ -242,13 +242,11 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
                     (*wakeup)();
                 }
             };
-            client_sessions_.
-                emplace(make_pair<int64_t, ClientSession>(std::move(key),
-                                                          { wakeup_end }));
-            auto &[_, client_session] = *client_sessions_.find(key);
-            client_session.set_task(run_session(client_session.get_wakeup(),
-                                                std::move(tcp_conn),
-                                                local_config));
+            auto client_session { std::make_shared<ClientSession>(wakeup_end) };
+            client_sessions_.insert(make_pair(key, client_session));
+            client_session->set_task(run_session(client_session->get_wakeup(),
+                                                 std::move(tcp_conn),
+                                                 local_config));
             connected = false;
             listener = accept(&wakeup_accept, tcp_server.get());
             listener.await_suspend();
@@ -256,7 +254,7 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
         for (auto key : notifications) {
             auto it { client_sessions_.find(key) };
             try {
-                it->second.get_task()->await_resume();
+                it->second->get_task()->await_resume();
                 cerr << "session " << key << " ended" << endl;
             } catch (const exception &e) {
                 cerr << "session " << key << " crashed: "
@@ -294,7 +292,8 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx { wakeup };
     auto req_flow { get_requests(mx.wakeup(0), client_stack.get_requests()) };
     auto login_req { co_await req_flow };
-    if (!authorized(std::move(login_req))) {
+    auto name { authorized(std::move(login_req)) };
+    if (!name) {
         cerr << "client unauthorized" << endl;
         co_await delay(wakeup, 3s);
         co_return;
@@ -330,17 +329,16 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     }
 }
 
-bool App::authorized(optional<Hold<json_thing_t>> login_req)
+optional<string> App::authorized(optional<Hold<json_thing_t>> login_req)
 {
     try {
-        authorize(std::move(login_req));
+        return authorize(std::move(login_req));
     } catch (const UnauthorizedException &e) {
-        return false;
+        return {};
     }
-    return true;
 }
 
-void App::authorize(optional<Hold<json_thing_t>> login_req)
+string App::authorize(optional<Hold<json_thing_t>> login_req)
 {
     if (!login_req)
         throw UnauthorizedException("no login request");
@@ -368,6 +366,7 @@ void App::authorize(optional<Hold<json_thing_t>> login_req)
     Hold<char> sha256 { base64_encode_simple(hash, sizeof hash), fsfree };
     if (client.sha256 != sha256.get())
         throw UnauthorizedException("authentication failure");
+    return name;
 }
 
 App::Future<Hold<tcp_conn_t>> App::connect_to_server(const Thunk *notify)
