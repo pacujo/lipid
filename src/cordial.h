@@ -179,7 +179,7 @@ public:
     /**
      * Commonalities between `Task`, `Future` and `Flow`.
      */
-    template<typename Promise, typename Output>
+    template<typename Promise>
     class BaseTask {
         friend Promise;
     public:
@@ -199,7 +199,7 @@ public:
         bool await_ready() { return false; }
         void await_suspend() { handle_.resume(); }
         void await_suspend(std::coroutine_handle<>) { await_suspend(); }
-        Output await_resume() { return handle_.promise().get_result(); }
+        auto await_resume() { return handle_.promise().get_result(); }
 
     private:
         std::coroutine_handle<Promise> handle_ {};
@@ -212,10 +212,10 @@ public:
      * (possibly) completes without a return value. The technical
      * return type `Nothing` is equivalent with `void`.
      */
-    using Task = BaseTask<TaskPromise, Nothing>;
+    using Task = BaseTask<TaskPromise>;
 
     struct TaskPromise : BasePromise<Nothing> {
-        Task get_return_object() { return Task { get_handle() }; }
+        auto get_return_object() { return Task { get_handle() }; }
         void return_void() {}
         std::coroutine_handle<TaskPromise> get_handle() {
             return std::coroutine_handle<TaskPromise>::from_promise(*this);
@@ -229,13 +229,11 @@ public:
      * `co_return EXPR`.
      */
     template<typename Result>
-    using Future = BaseTask<FuturePromise<Result>, Result>;
+    using Future = BaseTask<FuturePromise<Result>>;
 
     template<typename Result>
     struct FuturePromise : BasePromise<Result> {
-        Future<Result> get_return_object() {
-            return Future<Result> { get_handle() };
-        }
+        auto get_return_object() { return Future<Result> { get_handle() }; }
         std::suspend_always return_value(Result &&value) {
             this->result_ = std::forward<Result>(value);
             return {};
@@ -256,13 +254,11 @@ public:
      * not be awaited again afterward.
      */
     template<typename Result>
-    using Flow = BaseTask<FlowPromise<Result>, std::optional<Result>>;
+    using Flow = BaseTask<FlowPromise<Result>>;
 
     template<typename Result>
     struct FlowPromise : BasePromise<std::optional<Result>> {
-        Flow<Result> get_return_object() {
-            return Flow<Result> { get_handle() };
-        }
+        auto get_return_object() { return Flow<Result> { get_handle() }; }
         std::suspend_always yield_value(Result &&value) {
             this->result_ = std::forward<Result>(value);
             this->notify();
