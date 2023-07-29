@@ -181,7 +181,6 @@ public:
      */
     template<typename Promise>
     class BaseTask {
-        friend Promise;
     public:
         using promise_type = Promise;
         using introspect = Introspect<promise_type>;
