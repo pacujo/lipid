@@ -57,7 +57,7 @@ void App::run(fstrace_t *trace)
         fsadns_destroy_resolver
     };
     auto server { run_server() };
-    server.await_suspend();
+    server.await_suspend(this);
     if (async_loop(get_async()) < 0)
         throw_errno();
 }
@@ -148,13 +148,13 @@ static path find_home_dir()
 
 App::Task App::run_server()
 {
-    auto wakeup { co_await intro<Task::introspect>() };
-    co_await resolve_addresses(wakeup);
+    auto [handle, _] { co_await Introspect<Task::promise_type> {} };
+    co_await resolve_addresses();
     vector<Task> holder;
     for (auto &local : config_.local)
         for (auto &res : local.resolutions) {
-            auto service { serve(wakeup, res, local) };
-            service.await_suspend();
+            auto service { serve(res, local) };
+            service.await_suspend(handle);
             holder.push_back(std::move(service));
         }
     for (auto &_ : holder)
@@ -164,13 +164,13 @@ App::Task App::run_server()
     async_quit_loop(get_async());
 }
 
-App::Task App::resolve_addresses(const Thunk *notify)
+App::Task App::resolve_addresses()
 {
-    auto wakeup { co_await intro<Task::introspect>(notify) };
+    auto [handle, _] { co_await Introspect<Task::promise_type> {} };
     vector<Future<AddrInfo>> resolve_local;
     for (auto &local : config_.local) {
-        auto local_fut { resolve_address(wakeup, local.address) };
-        local_fut.await_suspend();
+        auto local_fut { resolve_address(local.address) };
+        local_fut.await_suspend(handle);
         resolve_local.emplace_back(std::move(local_fut));
     }
     for (auto &_ : resolve_local)
@@ -184,10 +184,9 @@ App::Task App::resolve_addresses(const Thunk *notify)
     }
 }
 
-App::Future<AddrInfo> App::resolve_address(const Thunk *notify,
-                                           const string &address)
+App::Future<AddrInfo> App::resolve_address(const string &address)
 {
-    auto wakeup { co_await intro<Future<AddrInfo>::introspect>(notify) };
+    auto [_, resume] { co_await Introspect<Future<AddrInfo>::promise_type> {} };
     auto resolved { false };
     auto canceler {
         [&resolved](fsadns_query_t *query) {
@@ -201,7 +200,7 @@ App::Future<AddrInfo> App::resolve_address(const Thunk *notify,
     };
     Hold<fsadns_query_t> query {
         fsadns_resolve(resolver_->get(), address.c_str(), nullptr, &hint,
-                       thunk_to_action(wakeup)),
+                       thunk_to_action(resume)),
         canceler
     };
     addrinfo *res;
@@ -219,10 +218,10 @@ App::Future<AddrInfo> App::resolve_address(const Thunk *notify,
     }
 }
 
-App::Task App::serve(const Thunk *notify, const SocketAddress &address,
+App::Task App::serve(const SocketAddress &address,
                      const LocalConfig &local_config)
 {
-    auto wakeup { co_await intro<Task::introspect>(notify) };
+    auto [handle, resume] { co_await Introspect<Task::promise_type> {} };
     Hold<tcp_server_t> tcp_server {
         tcp_listen(get_async(),
                    reinterpret_cast<const sockaddr *>(&address.address),
@@ -233,36 +232,33 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
         throw_errno();
     vector<int64_t> notifications;
     auto connected { false };
-    Thunk wakeup_accept {
-        [wakeup, &connected]() {
+    Thunk resume_accept {
+        [resume, &connected]() {
             connected = true;
-            (*wakeup)();
+            (*resume)();
         }
     };
-    auto listener { accept(&wakeup_accept, tcp_server.get()) };
-    listener.await_suspend();
+    auto listener { accept(tcp_server.get()) };
+    listener.await_suspend(handle, &resume_accept);
     for (;;) {
         co_await suspend;
         if (connected) {
             auto tcp_conn { listener.await_resume() };
             auto key { next_session_++ };
-            Thunk wakeup_end {
-                [key, wakeup, &notifications]() {
+            Thunk resume_end {
+                [key, resume, &notifications]() {
                     notifications.push_back(key);
-                    (*wakeup)();
+                    (*resume)();
                 }
             };
-            auto client_session { std::make_shared<ClientSession>(wakeup_end) };
+            auto client_session { std::make_shared<ClientSession>(resume_end) };
             client_sessions_.insert(make_pair(key, client_session));
-            auto client_task {
-                run_session(client_session->get_wakeup(), std::move(tcp_conn),
-                            local_config)
-            };
-            client_task.await_suspend();
+            auto client_task { run_session(std::move(tcp_conn), local_config) };
+            client_task.await_suspend(handle, client_session->resumer());
             client_session->set_task(std::move(client_task));
             connected = false;
-            listener = accept(&wakeup_accept, tcp_server.get());
-            listener.await_suspend();
+            listener = accept(tcp_server.get());
+            listener.await_suspend(handle, &resume_accept);
         }
         for (auto key : notifications) {
             auto it { client_sessions_.find(key) };
@@ -279,12 +275,11 @@ App::Task App::serve(const Thunk *notify, const SocketAddress &address,
     }
 }
 
-App::Future<Hold<tcp_conn_t>> App::accept(const Thunk *notify,
-                                          tcp_server_t *tcp_server)
+App::Future<Hold<tcp_conn_t>> App::accept(tcp_server_t *tcp_server)
 {
-    auto wakeup
-        { co_await intro<Future<Hold<tcp_conn_t>>::introspect>(notify) };
-    tcp_register_server_callback(tcp_server, thunk_to_action(wakeup));
+    auto [_, resume]
+        { co_await Introspect<Future<Hold<tcp_conn_t>>::promise_type> {} };
+    tcp_register_server_callback(tcp_server, thunk_to_action(resume));
     Hold<tcp_server_t> dereg { tcp_server, tcp_unregister_server_callback };
     for (;;) {
         Hold<tcp_conn_t> tcp_conn
@@ -297,29 +292,29 @@ App::Future<Hold<tcp_conn_t>> App::accept(const Thunk *notify,
     }
 }
 
-App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
+App::Task App::run_session(Hold<tcp_conn_t> tcp_conn,
                            const LocalConfig &local_config)
 {
-    auto wakeup { co_await intro<Task::introspect>(notify) };
+    auto [_, resume] { co_await Introspect<Task::promise_type> {} };
+    enum { REQ, RESP };
+    Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx { resume };
     ClientStack client_stack { get_async(), std::move(tcp_conn), local_config };
-    Multiplex<Flow<Hold<json_thing_t>>, Flow<string>> mx { wakeup };
-    auto req_flow { get_requests(mx.wakeup(0), client_stack.get_requests()) };
-    auto login_req { co_await req_flow };
-    auto name { authorized(std::move(login_req)) };
+    auto req_flow { get_requests(client_stack.get_requests()) };
+    auto login_req { co_await mx.tie(&req_flow, nullptr) };
+    auto name { authorized(std::get<REQ>(login_req)) };
     if (!name) {
         cerr << "client unauthorized" << endl;
-        co_await delay(wakeup, 3s);
+        co_await delay(3s);
         co_return;
     }
-    auto irc_conn { co_await connect_to_server(wakeup) };
+    auto irc_conn { co_await connect_to_server() };
     ServerStack server_stack
         { get_async(), std::move(irc_conn), config_.irc_server.address };
     auto resp_flow
-        { get_response(mx.wakeup(1), server_stack.get_responses()) };
+        { get_response(server_stack.get_responses()) };
     auto login_resp { make_response("login") };
     send(client_stack.get_responses(), login_resp.get());
     for (;;) {
-        enum { REQ, RESP };
         auto result { co_await mx.tie(&req_flow, &resp_flow) };
         if (result.index() == REQ) {
             auto &request { std::get<REQ>(result) };
@@ -342,16 +337,16 @@ App::Task App::run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
     }
 }
 
-optional<string> App::authorized(optional<Hold<json_thing_t>> login_req)
+optional<string> App::authorized(optional<Hold<json_thing_t>> &login_req)
 {
     try {
-        return authorize(std::move(login_req));
+        return authorize(login_req);
     } catch (const UnauthorizedException &e) {
         return {};
     }
 }
 
-string App::authorize(optional<Hold<json_thing_t>> login_req)
+string App::authorize(optional<Hold<json_thing_t>> &login_req)
 {
     if (!login_req)
         throw UnauthorizedException("no login request");
@@ -382,10 +377,10 @@ string App::authorize(optional<Hold<json_thing_t>> login_req)
     return name;
 }
 
-App::Future<Hold<tcp_conn_t>> App::connect_to_server(const Thunk *notify)
+App::Future<Hold<tcp_conn_t>> App::connect_to_server()
 {
-    auto wakeup
-        { co_await intro<Future<Hold<tcp_conn_t>>::introspect>(notify) };
+    auto [_, resume]
+        { co_await Introspect<Future<Hold<tcp_conn_t>>::promise_type> {} };
     Hold<tcp_client_t> setup {
         open_tcp_client_2(get_async(),
                           config_.irc_server.address.c_str(),
@@ -393,7 +388,7 @@ App::Future<Hold<tcp_conn_t>> App::connect_to_server(const Thunk *notify)
                           resolver_->get()),
         tcp_client_close
     };
-    tcp_client_register_callback(setup.get(), thunk_to_action(wakeup));
+    tcp_client_register_callback(setup.get(), thunk_to_action(resume));
     Hold<tcp_client_t> dereg { setup.get(), tcp_client_unregister_callback };
     for (;;) {
         Hold<tcp_conn_t> irc_conn
@@ -406,25 +401,21 @@ App::Future<Hold<tcp_conn_t>> App::connect_to_server(const Thunk *notify)
     }
 }
 
-App::Flow<Hold<json_thing_t>> App::get_requests(const Thunk *notify,
-                                                jsonyield_t *requests)
+App::Flow<Hold<json_thing_t>> App::get_requests(jsonyield_t *requests)
 {
-    auto wakeup
-        { co_await intro<Flow<Hold<json_thing_t>>::introspect>(notify) };
     for (;;) {
-        auto request { co_await get_request(wakeup, requests) };
+        auto request { co_await get_request(requests) };
         if (!request)
             break;
         co_yield std::move(request);
     }
 }
 
-App::Future<Hold<json_thing_t>> App::get_request(const Thunk *notify,
-                                                 jsonyield_t *requests)
+App::Future<Hold<json_thing_t>> App::get_request(jsonyield_t *requests)
 {
-    auto wakeup
-        { co_await intro<Future<Hold<json_thing_t>>::introspect>(notify) };
-    jsonyield_register_callback(requests, thunk_to_action(wakeup));
+    auto [_, resume]
+        { co_await Introspect<Future<Hold<json_thing_t>>::promise_type> {} };
+    jsonyield_register_callback(requests, thunk_to_action(resume));
     Hold<jsonyield_t> dereg { requests, jsonyield_unregister_callback };
     for (;;) {
         Hold<json_thing_t> request
@@ -512,13 +503,12 @@ void App::send(queuestream_t *qstr, json_thing_t *msg)
     queuestream_enqueue(qstr, framer);
 }
 
-App::Flow<string> App::get_response(const Thunk *notify, bytestream_1 responses)
+App::Flow<string> App::get_response(bytestream_1 responses)
 {
-    auto wakeup { co_await intro<Flow<string>::introspect>(notify) };
     string response;
     for (;;) {
         char buffer[1100];
-        auto count { co_await read(wakeup, responses, buffer, sizeof buffer) };
+        auto count { co_await read(responses, buffer, sizeof buffer) };
         if (count > 0) {
             response.append(buffer, count);
             for (;;) {
@@ -538,11 +528,10 @@ App::Flow<string> App::get_response(const Thunk *notify, bytestream_1 responses)
     }
 }
 
-App::Future<size_t> App::read(const Thunk *notify, bytestream_1 stream,
-                              char *buffer, size_t length)
+App::Future<size_t> App::read(bytestream_1 stream, char *buffer, size_t length)
 {
-    auto wakeup { co_await intro<Future<size_t>::introspect>(notify) };
-    bytestream_1_register_callback(stream, thunk_to_action(wakeup));
+    auto [_, resume] { co_await Introspect<Future<size_t>::promise_type> {} };
+    bytestream_1_register_callback(stream, thunk_to_action(resume));
     Keep<bytestream_1> dereg { stream, bytestream_1_unregister_callback };
     for (;;) {
         auto count { bytestream_1_read(stream, buffer, sizeof buffer) };
@@ -561,18 +550,22 @@ static void parse_cmdline(int argc, char **argv, Opts &opts)
         { "help", no_argument, 0, 'h' },
         { "trace-include", required_argument, 0, 'I' },
         { "trace-exclude", required_argument, 0, 'E' },
+        { "debug", no_argument, 0, 'd' },
         { 0 }
     };
     auto done { false };
     while (!done) {
         auto option_index { 0 };
-        auto opt = getopt_long(argc, argv, "c:h", long_options, &option_index);
+        auto opt = getopt_long(argc, argv, "c:hd", long_options, &option_index);
         switch (opt) {
             case -1:
                 done = true;
                 break;
             case 'c':
                 opts.config_file = optarg;
+                break;
+            case 'd':
+                opts.debug = true;
                 break;
             case 'h':
                 opts.help = true;
@@ -614,6 +607,7 @@ static void print_usage(std::ostream &os)
     os << " -c | --config CONFIG-FILE  use config file" << endl;
     os << " --trace-include REGEX      select trace events" << endl;
     os << " --trace-exclude REGEX      deselect trace events" << endl;
+    os << " --debug                    debug mode" << endl;
 }
 
 int main(int argc, char **argv)
@@ -631,11 +625,14 @@ int main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     auto trace = init_tracing(opts);
-    try {
+    if (opts.debug)
         App(home_dir, opts).run(trace);
-    } catch (const exception &e) {
-        cerr << "lipid: " << e.what() << endl;
-        return EXIT_FAILURE;
-    }
+    else
+        try {
+            App(home_dir, opts).run(trace);
+        } catch (const exception &e) {
+            cerr << "lipid: " << e.what() << endl;
+            return EXIT_FAILURE;
+        }
     return EXIT_SUCCESS;
 }

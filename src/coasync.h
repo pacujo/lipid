@@ -12,8 +12,8 @@ public:
 
     async_t *get_async() const { return async_; }
 
-    static action_1 thunk_to_action(const pacujo::cordial::Thunk *wakeup) {
-        void *obj = (void *) wakeup;
+    static action_1 thunk_to_action(const pacujo::cordial::Thunk *resume) {
+        void *obj = (void *) resume;
         return { obj, execute };
     }
 
@@ -49,9 +49,9 @@ private:
     };
 
 public:
-    Task reschedule(const pacujo::cordial::Thunk *notify) override {
-        auto wakeup { co_await intro<Task::introspect>(notify) };
-        Timer t { get_async(), wakeup };
+    Task reschedule() override {
+        auto [_, resume] { co_await Introspect<Task::promise_type> {} };
+        Timer t { get_async(), resume };
         co_await std::suspend_always {};
     }
 
@@ -77,9 +77,9 @@ private:
         delete reinterpret_cast<Disposable *>(obj);
     }
 
-    Task delay_ns(const pacujo::cordial::Thunk *notify, uint64_t ns) override {
-        auto wakeup { co_await intro<Task::introspect>(notify) };
-        Timer t { get_async(), async_now(get_async()) + ns * ASYNC_NS, wakeup };
+    Task delay_ns(uint64_t ns) override {
+        auto [_, resume] { co_await Introspect<Task::promise_type> {} };
+        Timer t { get_async(), async_now(get_async()) + ns * ASYNC_NS, resume };
         co_await std::suspend_always {};
     }
 };

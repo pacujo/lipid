@@ -196,6 +196,7 @@ struct Opts {
     std::optional<std::filesystem::path> config_file;
     std::optional<std::string> trace_include;
     std::optional<std::string> trace_exclude;
+    bool debug {};
 };
 
 class AddrInfo {
@@ -223,22 +224,22 @@ public:
 private:
     class ClientSession {
     public:
-        ClientSession(const Thunk &wakeup) : wakeup_ { wakeup } {}
+        ClientSession(const Thunk &resume) : resume_ { resume } {}
         ClientSession(ClientSession &&other) = default;
         ClientSession &operator=(ClientSession &&other) = default;
         void set_task(Task &&task) { task_ = std::move(task); }
         optional<Task> &get_task() { return task_; }
-        const Thunk *get_wakeup() const { return &wakeup_; }
+        const Thunk *resumer() const { return &resume_; }
     private:
-        Thunk wakeup_;
+        Thunk resume_;
         optional<Task> task_;
     };
 
     class ServerSession {
     public:
-        ServerSession(const Thunk &wakeup) : wakeup_ { wakeup } {}
+        ServerSession(const Thunk &resume) : resume_ { resume } {}
     private:
-        Thunk wakeup_;
+        Thunk resume_;
         optional<Task> task_;
     };
 
@@ -254,23 +255,17 @@ private:
     void add_locals(json_thing_t *locals);
     void add_clients(json_thing_t *clients);
     Task run_server();
-    Task resolve_addresses(const Thunk *notify);
-    Future<AddrInfo> resolve_address(const Thunk *notify,
-                                     const std::string &address);
-    Task serve(const Thunk *notify,
-               const pacujo::net::SocketAddress &address,
+    Task resolve_addresses();
+    Future<AddrInfo> resolve_address(const std::string &address);
+    Task serve(const pacujo::net::SocketAddress &address,
                const LocalConfig &local_config);
-    Future<Hold<tcp_conn_t>> accept(const Thunk *notify,
-                                    tcp_server_t *tcp_server);
-    Task run_session(const Thunk *notify, Hold<tcp_conn_t> tcp_conn,
-                     const LocalConfig &local_config);
-    optional<std::string> authorized(optional<Hold<json_thing_t>> login_req);
-    std::string authorize(optional<Hold<json_thing_t>> login_req);
-    Future<Hold<tcp_conn_t>> connect_to_server(const Thunk *notify);
-    Flow<Hold<json_thing_t>> get_requests(const Thunk *notify,
-                                          jsonyield_t *requests);
-    Future<Hold<json_thing_t>> get_request(const Thunk *notify,
-                                           jsonyield_t *requests);
+    Future<Hold<tcp_conn_t>> accept(tcp_server_t *tcp_server);
+    Task run_session(Hold<tcp_conn_t> tcp_conn, const LocalConfig &local_config);
+    optional<std::string> authorized(optional<Hold<json_thing_t>> &login_req);
+    std::string authorize(optional<Hold<json_thing_t>> &login_req);
+    Future<Hold<tcp_conn_t>> connect_to_server();
+    Flow<Hold<json_thing_t>> get_requests(jsonyield_t *requests);
+    Future<Hold<json_thing_t>> get_request(jsonyield_t *requests);
     void process_client_request(queuestream_t *responses,
                                 json_thing_t *request,
                                 queuestream_t *requests);
@@ -280,7 +275,6 @@ private:
     void reject_request(queuestream_t *responses, const std::string &reason);
     Hold<json_thing_t> make_response(const std::string &type);
     void send(queuestream_t *q, json_thing_t *msg);
-    Flow<std::string> get_response(const Thunk *notify, bytestream_1 responses);
-    Future<size_t> read(const Thunk *notify, bytestream_1 stream,
-                        char *buffer, size_t length);
+    Flow<std::string> get_response(bytestream_1 responses);
+    Future<size_t> read(bytestream_1 stream, char *buffer, size_t length);
 };

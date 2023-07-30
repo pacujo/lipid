@@ -74,11 +74,17 @@ public:
         unsigned use_count_ { 1 };
     };
 
+    template<typename Promise>
+    class BaseTask;
+
     /**
      * Commonalities between `TaskPromise`, `FuturePromise` and `FlowPromise`.
      */
     template<typename Result>
     class BasePromise {
+        template<typename Promise>
+        friend class BaseTask;
+
     public:
         std::suspend_always initial_suspend() { return {}; }
         std::suspend_always final_suspend() noexcept {
@@ -88,24 +94,19 @@ public:
         void unhandled_exception() {
             exception_ = std::current_exception();
         }
-        void arm(const Thunk *notify, RefCounted *companion) {
-            notify_ = notify;
-            companion_ = companion;
-        }
+        void arm(const Thunk *notify) { notify_ = notify; }
+        Framework *framework() const { return framework_; }
         Result get_result() {
             if (exception_)
                 std::rethrow_exception(exception_);
             return std::move(result_);
         }
+        const Thunk *resumer() const { return &lazy_resume_; }
 
     protected:
         ~BasePromise() {
-            if (companion_->disown()) {
-                // No need to go through framework->dispose(). Thus,
-                // BasePromise doesn't even need to carry a framework
-                // reference around.
+            if (companion_ && companion_->disown())
                 delete companion_;
-            }
         }
         void notify() { (*notify_)(); }
 
@@ -113,67 +114,57 @@ public:
 
     private:
         std::exception_ptr exception_;
-        const Thunk *notify_;
-        RefCounted *companion_;
+        Framework *framework_ {};
+        const Thunk *notify_ {};
+        Thunk lazy_resume_;
+        RefCounted *companion_ {};
     };
 
     /**
      * A "zombie" structure left behind after a coroutine has been
      * deallocated but callbacks are still pending.
      */
-    template<typename PromiseType>
+    template<typename Promise>
     class Companion : public RefCounted {
     public:
-        Companion(PromiseType *promise, Framework *framework) :
-            electric_wakeup_ {
-                [this, promise, framework]() {
+        Companion(Promise *promise) :
+            framework_ { promise->framework() },
+            electric_resume_ {
+                [this, promise]() {
                     if (owned())
                         promise->get_handle().resume();
                     if (release())
-                        framework->dispose(this);
-                }
-            },
-            executor_ { framework->executor(&electric_wakeup_) },
-            lazy_wakeup_ {
-                [this]() {
-                    take();
-                    executor_();
+                        framework_->dispose(this);
                 }
             }
         {}
-        const Thunk *wakeup() const { return &lazy_wakeup_; }
+        const Thunk *resumer() const { return &electric_resume_; }
         
     private:
-        Thunk electric_wakeup_;
-        Thunk executor_;
-        Thunk lazy_wakeup_;
+        Framework *framework_;
+        Thunk electric_resume_;
     };
 
     /**
-     * A class used by the `intro` boilerplate.
+     * Discover the handle and resume thunk of the running coroutine:
      *
-     * @see intro(const Thunk *)
+     *     auto [handle, resume]
+     *         { co_await Introspect<MyCoro::promise_type> {} };
      */
-    template<typename PromiseType>
+    template<typename Promise>
     class Introspect {
     public:
-        Introspect(Framework *framework, const Thunk *notify) :
-            framework_ { framework }, notify_ { notify } {}
         bool await_ready() { return false; }
-        bool await_suspend(std::coroutine_handle<PromiseType> h) {
-            promise_ = &h.promise();
+        bool await_suspend(std::coroutine_handle<Promise> h) {
+            handle_ = h;
             return false;
         }
-        const Thunk *await_resume() const noexcept {
-            auto companion { new Companion(promise_, framework_) };
-            promise_->arm(notify_, companion);
-            return companion->wakeup();
+        auto await_resume() const noexcept {
+            return std::pair(handle_, handle_.promise().resumer());
         }
 
     private:
-        Framework *framework_;
-        PromiseType *promise_;
-        const Thunk *notify_;
+        std::coroutine_handle<Promise> handle_;
     };
 
     /**
@@ -183,7 +174,6 @@ public:
     class BaseTask {
     public:
         using promise_type = Promise;
-        using introspect = Introspect<promise_type>;
 
         BaseTask(std::coroutine_handle<Promise> handle) : handle_ { handle } {}
         BaseTask(BaseTask &&other) : handle_ { other.handle_ } {
@@ -196,8 +186,31 @@ public:
         }
         ~BaseTask() { if (handle_) handle_.destroy(); }
         bool await_ready() { return false; }
-        void await_suspend() { handle_.resume(); }
-        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
+
+        void await_suspend(Framework *framework, const Thunk *notify = nullptr) {
+            auto promise { &handle_.promise() };
+            if (!promise->companion_) {
+                promise->framework_ = framework;
+                auto companion { new Companion(promise) };
+                auto executor = framework->executor(companion->resumer());
+                promise->lazy_resume_ = [companion, executor]() {
+                    companion->take();
+                    executor();
+                };
+                promise->companion_ = companion;
+                promise->notify_ = notify;
+            }
+            handle_.resume();
+        }
+
+        template<typename AwaitingPromise>
+        void await_suspend(std::coroutine_handle<AwaitingPromise> awaiter,
+                           const Thunk *notify = nullptr) {
+            auto awaiter_promise { &awaiter.promise() };
+            await_suspend(awaiter_promise->framework_,
+                          notify ?: awaiter_promise->resumer());
+        }
+
         auto await_resume() { return handle_.promise().get_result(); }
 
     private:
@@ -276,11 +289,13 @@ public:
      * any of the participating coroutines yields or returns.
      *
      * The setup is a multistep process:
-     *
-     *     Multiplex<Task, Future<string>, Flow<int>> mx(wakeup);
-     *     auto task { do_it(mx.wakeup(0) };
-     *     auto future { find_out(mx.wakeup(1) };
-     *     auto flow { pour_it(mx.wakeup(2) };
+     *     
+     *     auto [_, resume]
+     *         { co_await Introspect<MyCoro::promise_type> {} };
+     *     Multiplex<Task, Future<string>, Flow<int>> mx { resume };
+     *     auto task { do_it() };
+     *     auto future { find_out() };
+     *     auto flow { pour_it() };
      *     for (;;) {
      *          auto result { co_await mx.tie(&task, &future, &flow) };
      *          if (result.index() == 0) {
@@ -292,29 +307,19 @@ public:
     public:
 
         /**
-         * The constructor takes the wakeup thunk of the calling
+         * The constructor takes the resume thunk of the calling
          * coroutine.
          *
          * Participating coroutines can then be instantiated and tied.
          */
-        Multiplex(const Thunk *wakeup) {
+        Multiplex(const Thunk *resume) {
             for (auto i = 0; i < legs_.size(); i++)
-                legs_[i].wakeup = [this, wakeup, i]() {
+                legs_[i].resume = [this, resume, i]() {
                     if (legs_[i].state == PENDING)
                         legs_[i].state = DONE;
-                    (*wakeup)();
+                    (*resume)();
                 };
         }
-
-        /**
-         * Participating coroutines must be instantiated (called) with
-         * a wakeup thunk returned by this method. The coroutine can
-         * still be used independently until it is tied for the first
-         * time.
-         *
-         * @see tie(Coros *...)
-         */
-        const Thunk *wakeup(std::size_t i) const { return &legs_[i].wakeup; }
 
         /**
          * Assign the participating coroutines. The coroutines can be
@@ -344,8 +349,11 @@ public:
                     return true;
             return false;
         }
-        void await_suspend() { await_suspend_tpl(); }
-        void await_suspend(std::coroutine_handle<>) { await_suspend(); }
+
+        template<typename AwaitingPromise>
+        void await_suspend(std::coroutine_handle<AwaitingPromise> awaiter) {
+            await_suspend_tpl(awaiter);
+        }
 
         /**
          * The coroutine results are returned one at a time using this
@@ -376,28 +384,28 @@ public:
 
         struct Leg {
             State state { IDLE };
-            Thunk wakeup;
+            Thunk resume;
         };
 
         std::array<Leg, sizeof...(Coros)> legs_;
         std::tuple<Coros *...> coros_;
 
-        template<std::size_t I = 0>
+        template<std::size_t I = 0, typename AwaitingPromise>
         inline typename std::enable_if<I < sizeof...(Coros), void>::type
-        await_suspend_tpl() {
+        await_suspend_tpl(std::coroutine_handle<AwaitingPromise> awaiter) {
             if (legs_[I].state == IDLE) {
                 auto coro { std::get<I>(coros_) };
                 if (coro != nullptr) {
                     legs_[I].state = PENDING;
-                    coro->await_suspend();
+                    coro->await_suspend(awaiter, &legs_[I].resume);
                 }
             }
-            await_suspend_tpl<I + 1>();
+            await_suspend_tpl<I + 1>(awaiter);
         }
 
-        template<std::size_t I = 0>
+        template<std::size_t I = 0, typename AwaitingPromise>
         inline typename std::enable_if<I == sizeof...(Coros), void>::type
-        await_suspend_tpl() {}
+        await_suspend_tpl(std::coroutine_handle<AwaitingPromise>) {}
 
         template<std::size_t I = 0>
         inline typename std::enable_if<I < sizeof...(Coros), Result>::type
@@ -441,24 +449,22 @@ public:
          * case of contention between multiple receivers, the receiver
          * that has waited longest gets the value.
          */
-        Future<T> receive(const Thunk *notify) {
-            auto wakeup {
-                co_await
-                framework_->intro<typename Future<T>::introspect>(notify)
-            };
+        Future<T> receive() {
             if (status_ == CONGESTED)
                 while (!peers_.empty()) {
                     auto peer { peers_.front().lock() };
                     peers_.pop();
                     if (peer) {
                         auto value { *peer->value };
-                        (*peer->wakeup)();
+                        (*peer->resume)();
                         co_return value;
                     }
                 }
             status_ = STARVED;
             T value;
-            auto peer { std::make_shared<Peer>(&value, wakeup) };
+            auto [handle, resume]
+                { co_await Introspect<typename Future<T>::promise_type> {} };
+            auto peer { std::make_shared<Peer>(&value, resume) };
             peers_.emplace(peer);
             co_await std::suspend_always {};
             co_return std::move(value);
@@ -470,21 +476,21 @@ public:
          * case of contention between multiple senders, the sender
          * that has waited longest sends the value.
          */
-        Task send(const Thunk *notify, T &&value) {
-            auto wakeup
-                { co_await framework_->intro<Task::introspect>(notify) };
+        Task send(T &&value) {
             if (status_ == STARVED)
                 while (!peers_.empty()) {
                     auto peer { peers_.front().lock() };
                     peers_.pop();
                     if (peer) {
                         *peer->value = std::move(value);
-                        (*peer->wakeup)();
+                        (*peer->resume)();
                         co_return;
                     }
                 }
             status_ = CONGESTED;
-            auto peer { std::make_shared<Peer>(&value, wakeup) };
+            auto [handle, resume]
+                { co_await Introspect<typename Future<T>::promise_type> {} };
+            auto peer { std::make_shared<Peer>(&value, resume) };
             peers_.emplace(peer);
             co_await std::suspend_always {};
         }
@@ -493,7 +499,7 @@ public:
         Framework *framework_;
         struct Peer {
             T *value;
-            const Thunk *wakeup;
+            const Thunk *resume;
         };
 
         // The value of status_ is a don't-care if peers_ is empty.
@@ -517,47 +523,21 @@ public:
     virtual void dispose(Disposable *disposable) = 0;
 
     /**
-     * The mandatory introductory command in any Task, Future or Flow
-     * in this framework. It is used to form the necessary
-     * interconnects between coroutines.
-     *
-     * The typical coroutine is called with a notification thunk
-     * ("notify") that is used to handshake with the caller/owner of
-     * the coroutine. The intro call produces another thunk ("wakeup")
-     * that is used between the subsidiary coroutines of the current
-     * coroutine.
-     *
-     * Thus, a coroutine could begin like this:
-     *
-     *     Task my_task(const Thunk *notify)
-     *     {
-     *         auto wakeup { co_await intro<Task::introspect>(notify) };
-     *         co_await other_task(wakeup);
-     *         auto result { co_await random(wakeup) };
-     *              :     :     :
-     *     }
-     */
-    template<typename Introspect>
-    Introspect intro(const Thunk *notify = nullptr) {
-        return Introspect { this, notify ?: &no_op};
-    }
-
-    /**
      * Suspend the current coroutine for the given duration, which
      * must support std::chrono::duration_cast.
      */
     template<typename Duration>
-    Task delay(const Thunk *notify, Duration duration) {
+    Task delay(Duration duration) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>
             (duration).count();
-        return delay_ns(notify, ns);
+        return delay_ns(ns);
     }
 
     /**
      * Cede the CPU to other coroutines and resume without delay. Used
      * to prevent CPU starvation.
      */
-    virtual Task reschedule(const Thunk *notify) = 0;
+    virtual Task reschedule() = 0;
 
 private:
 
@@ -567,7 +547,7 @@ private:
      *
      * @see delay(const Thunk *, Duration)
      */
-    virtual Task delay_ns(const Thunk *notify, uint64_t ns) = 0;
+    virtual Task delay_ns(uint64_t ns) = 0;
 
     /**
      * A dummy thunk. It is not static so a separate source code file
