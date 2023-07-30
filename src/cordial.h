@@ -150,6 +150,8 @@ public:
      *
      *     auto [handle, resume]
      *         { co_await Introspect<MyCoro::promise_type> {} };
+     *
+     * The introspection coroutine finishes immediately without suspending.
      */
     template<typename Promise>
     class Introspect {
@@ -187,6 +189,11 @@ public:
         ~BaseTask() { if (handle_) handle_.destroy(); }
         bool await_ready() { return false; }
 
+        /**
+         * Use this version of await_suspend() to start a coroutine
+         * from a non-coroutine. The optional `notify` argument is
+         * only used internally.
+         */
         void await_suspend(Framework *framework, const Thunk *notify = nullptr) {
             auto promise { &handle_.promise() };
             if (!promise->companion_) {
@@ -203,6 +210,19 @@ public:
             handle_.resume();
         }
 
+        /**
+         * Coroutines are typically invoked with `co_await`. However,
+         * more complicated use cases (like multiplexing) entail
+         * micromanaging the process in user code:
+         *
+         *     auto [handle, resume]
+         *         { co_await Introspect<MyCoro::promise_type> {} };
+         *     Thunk resume_special { tweak(resume) };
+         *     auto other { other_coro() };
+         *     other.await_suspend(handle, &resume_special);
+         *     co_await std::suspend_always {};
+         *     auto result { other.await_resume() };
+         */
         template<typename AwaitingPromise>
         void await_suspend(std::coroutine_handle<AwaitingPromise> awaiter,
                            const Thunk *notify = nullptr) {
@@ -322,14 +342,13 @@ public:
         }
 
         /**
-         * Assign the participating coroutines. The coroutines can be
-         * used independently before they are tied. However, once a
-         * coroutine has been tied, it can no longer be used outside
-         * the Multiplex object's context.
+         * Assign the participating coroutines. The participating
+         * coroutines cannot be awaited independently but the
+         * `Multiplex` object must be awaited instead.
          *
          * `nullptr` can take the place of a coroutine until it is
          * tied for the first time. Also, once a coroutine has
-         * finished, `nullptr` should be used in its staid
+         * finished, `nullptr` should be used in its stead
          * subsequently.
          *
          * You can tie the participating coroutines once and await the
