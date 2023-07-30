@@ -54,9 +54,6 @@ public:
     using WeakPulse = std::weak_ptr<Nothing>;
 
     template<typename Promise>
-    class BaseTask;
-
-    template<typename Promise>
     class Resumer : public Disposable {
     public:
         Resumer(Promise *promise) :
@@ -64,8 +61,7 @@ public:
             framework_ { promise->framework_ },
             resume_ {
                 [this, promise]() {
-                    auto pulse { pulse_.lock() };
-                    if (pulse)
+                    if (pulse_.lock())
                         promise->get_handle().resume();
                     framework_->dispose(this);
                 }
@@ -78,6 +74,9 @@ public:
         Framework *framework_;
         Thunk resume_;
     };
+
+    template<typename Promise>
+    class BaseTask;
 
     /**
      * Commonalities between `TaskPromise`, `FuturePromise` and `FlowPromise`.
