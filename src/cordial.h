@@ -50,32 +50,14 @@ public:
         virtual ~Disposable() {}
     };
 
-    /**
-     * A reference-counting structure to support callbacks from the
-     * "background" after a coroutine has been deallocated.
-     *
-     * Its function is analogous to the standard smart pointers, but
-     * it has technical advantages. In particular, a simple pointer
-     * can be passed on to the concrete (C?) framework for deletion in
-     * the background.
-     */
-    class RefCounted : public Disposable {
-    public:
-        void take() { use_count_++; }
-        bool release() { return --use_count_ == 0; }
-        bool disown() {
-            owned_ = false;
-            return release();
-        }
-        bool owned() const { return owned_; }
-
-    private:
-        bool owned_ { true };
-        unsigned use_count_ { 1 };
-    };
+    using StrongPulse = std::shared_ptr<Nothing>;
+    using WeakPulse = std::weak_ptr<Nothing>;
 
     template<typename Promise>
     class BaseTask;
+
+    template<typename Promise>
+    class Resumer;
 
     /**
      * Commonalities between `TaskPromise`, `FuturePromise` and `FlowPromise`.
@@ -84,6 +66,9 @@ public:
     class BasePromise {
         template<typename Promise>
         friend class BaseTask;
+
+        template<typename Promise>
+        friend class Resumer;
 
     public:
         std::suspend_always initial_suspend() { return {}; }
@@ -104,10 +89,6 @@ public:
         const Thunk *resumer() const { return &lazy_resume_; }
 
     protected:
-        ~BasePromise() {
-            if (companion_ && companion_->disown())
-                delete companion_;
-        }
         void notify() { (*notify_)(); }
 
         Result result_ {};
@@ -117,32 +98,28 @@ public:
         Framework *framework_ {};
         const Thunk *notify_ {};
         Thunk lazy_resume_;
-        RefCounted *companion_ {};
+        StrongPulse pulse_ { std::make_shared<Nothing>() };
     };
 
-    /**
-     * A "zombie" structure left behind after a coroutine has been
-     * deallocated but callbacks are still pending.
-     */
     template<typename Promise>
-    class Companion : public RefCounted {
+    class Resumer : public Disposable {
     public:
-        Companion(Promise *promise) :
-            framework_ { promise->framework() },
-            electric_resume_ {
+        Resumer(Promise *promise) :
+            pulse_ { promise->pulse_ },
+            resume_ {
                 [this, promise]() {
-                    if (owned())
+                    auto pulse { pulse_.lock() };
+                    if (pulse)
                         promise->get_handle().resume();
-                    if (release())
-                        framework_->dispose(this);
+                    promise->framework_->dispose(this);
                 }
             }
         {}
-        const Thunk *resumer() const { return &electric_resume_; }
+        const Thunk *resumer() const { return &resume_; }
         
     private:
-        Framework *framework_;
-        Thunk electric_resume_;
+        WeakPulse pulse_;
+        Thunk resume_;
     };
 
     /**
@@ -196,15 +173,12 @@ public:
          */
         void await_suspend(Framework *framework, const Thunk *notify = nullptr) {
             auto promise { &handle_.promise() };
-            if (!promise->companion_) {
+            if (!promise->framework_) {
                 promise->framework_ = framework;
-                auto companion { new Companion(promise) };
-                auto executor = framework->executor(companion->resumer());
-                promise->lazy_resume_ = [companion, executor]() {
-                    companion->take();
-                    executor();
+                promise->lazy_resume_ = [promise]() {
+                    auto resumer { (new Resumer(promise))->resumer() };
+                    promise->framework_->executor(resumer)();
                 };
-                promise->companion_ = companion;
                 promise->notify_ = notify;
             }
             handle_.resume();
