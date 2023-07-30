@@ -57,7 +57,27 @@ public:
     class BaseTask;
 
     template<typename Promise>
-    class Resumer;
+    class Resumer : public Disposable {
+    public:
+        Resumer(Promise *promise) :
+            pulse_ { promise->pulse_ },
+            framework_ { promise->framework_ },
+            resume_ {
+                [this, promise]() {
+                    auto pulse { pulse_.lock() };
+                    if (pulse)
+                        promise->get_handle().resume();
+                    framework_->dispose(this);
+                }
+            }
+        {}
+        const Thunk *resumer() const { return &resume_; }
+        
+    private:
+        WeakPulse pulse_;
+        Framework *framework_;
+        Thunk resume_;
+    };
 
     /**
      * Commonalities between `TaskPromise`, `FuturePromise` and `FlowPromise`.
@@ -99,27 +119,6 @@ public:
         const Thunk *notify_ {};
         Thunk lazy_resume_;
         StrongPulse pulse_ { std::make_shared<Nothing>() };
-    };
-
-    template<typename Promise>
-    class Resumer : public Disposable {
-    public:
-        Resumer(Promise *promise) :
-            pulse_ { promise->pulse_ },
-            resume_ {
-                [this, promise]() {
-                    auto pulse { pulse_.lock() };
-                    if (pulse)
-                        promise->get_handle().resume();
-                    promise->framework_->dispose(this);
-                }
-            }
-        {}
-        const Thunk *resumer() const { return &resume_; }
-        
-    private:
-        WeakPulse pulse_;
-        Thunk resume_;
     };
 
     /**
@@ -173,6 +172,8 @@ public:
          */
         void await_suspend(Framework *framework, const Thunk *notify = nullptr) {
             auto promise { &handle_.promise() };
+            // This is how the framework pointer propagates behind the
+            // scenes throughout the mesh of coroutines.
             if (!promise->framework_) {
                 promise->framework_ = framework;
                 promise->lazy_resume_ = [promise]() {
