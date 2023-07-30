@@ -539,12 +539,6 @@ private:
      * @see delay(const Thunk *, Duration)
      */
     virtual Task delay_ns(uint64_t ns) = 0;
-
-    /**
-     * A dummy thunk. It is not static so a separate source code file
-     * is not needed.
-     */
-    Thunk no_op = [](){};
 };
 
 }; // namespace pacujo::cordial
