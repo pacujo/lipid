@@ -17,7 +17,10 @@
 #include <fstrace.h>
 
 #include "app.h"
-#include "hold.h"
+#include "multiplex.h"
+#if 0
+#include "rendezvous.h"
+#endif
 
 using std::exception;
 using std::filesystem::path;
@@ -35,6 +38,7 @@ using std::endl;
 
 using pacujo::cordial::Thunk;
 using pacujo::cordial::throw_errno;
+using pacujo::cordial::Multiplex;
 using pacujo::etc::Hold;
 using pacujo::etc::Keep;
 using pacujo::net::SocketAddress;
