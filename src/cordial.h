@@ -177,7 +177,7 @@ public:
                 promise->framework_ = framework;
                 promise->lazy_resume_ = [promise]() {
                     auto resumer { (new Resumer(promise))->resumer() };
-                    promise->framework_->executor(resumer)();
+                    promise->framework_->execute(resumer);
                 };
                 promise->notify_ = notify;
             }
@@ -503,11 +503,9 @@ public:
     };
 
     /**
-     * Produce a thunk that, when called, "backgrounds" the execution
-     * of another thunk (`function`). The returned thunk can be called
-     * any number of times as long as `function` exists.
+     * "Background" the execution of a thunk
      */
-    virtual Thunk executor(const Thunk *function) = 0;
+    virtual void execute(const Thunk *function) = 0;
 
     /**
      * "Background" the deletion of the given disposable object to

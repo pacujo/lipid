@@ -55,11 +55,8 @@ public:
         co_await std::suspend_always {};
     }
 
-    pacujo::cordial::Thunk
-    executor(const pacujo::cordial::Thunk *function) override {
-        return [this, function]() {
-            async_execute(get_async(), thunk_to_action(function));
-        };
+    void execute(const pacujo::cordial::Thunk *function) override {
+        async_execute(get_async(), thunk_to_action(function));
     }
 
     void dispose(Disposable *disposable) override {
